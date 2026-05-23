@@ -1317,7 +1317,13 @@ function App() {
   // Compute positioned nodes for flow rendering
   const flowNodes = React.useMemo(() => {
     if (!graph) return [];
-    const nodes = computeLayout(graph.nodes, graph.edges);
+    const seenNodeIds = new Set<string>();
+    const dedupedGraphNodes = graph.nodes.filter((n: RepoNode) => {
+      if (seenNodeIds.has(n.id)) return false;
+      seenNodeIds.add(n.id);
+      return true;
+    });
+    const nodes = computeLayout(dedupedGraphNodes, graph.edges);
     const hasSelection = selectedNode !== null;
 
     return nodes.map((node) => {
@@ -1349,7 +1355,13 @@ function App() {
     if (!graph) return [];
     const hasSelection = selectedNode !== null;
 
-    return graph.edges.map((edge: RepoEdge) => {
+    const seenEdgeIds = new Set<string>();
+    const dedupedEdges = graph.edges.filter((edge: RepoEdge) => {
+      if (seenEdgeIds.has(edge.id)) return false;
+      seenEdgeIds.add(edge.id);
+      return true;
+    });
+    return dedupedEdges.map((edge: RepoEdge) => {
       const isHighlighted = connectedEdgeIds.has(edge.id);
       let edgeClass = "";
       if (hasSelection) {

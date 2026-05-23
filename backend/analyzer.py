@@ -298,8 +298,22 @@ def build_repo_graph_local(root: str) -> Dict:
                         "label": "imports"
                     })
 
-    summary = create_summary(nodes, edges)
-    return {"nodes": nodes, "edges": edges, "summary": summary}
+    seen_node_ids: set = set()
+    unique_nodes = []
+    for n in nodes:
+        if n["id"] not in seen_node_ids:
+            seen_node_ids.add(n["id"])
+            unique_nodes.append(n)
+
+    seen_edge_ids: set = set()
+    unique_edges = []
+    for e in edges:
+        if e["id"] not in seen_edge_ids:
+            seen_edge_ids.add(e["id"])
+            unique_edges.append(e)
+
+    summary = create_summary(unique_nodes, unique_edges)
+    return {"nodes": unique_nodes, "edges": unique_edges, "summary": summary}
 
 
 def create_summary(nodes: List[Dict], edges: List[Dict]) -> str:
@@ -1668,9 +1682,27 @@ def build_repo_graph(root: str) -> Dict:
                 "metadata": metadata
             })
             
+        raw_edges = graph_data.get("edges", [])
+        seen_eids: set = set()
+        unique_edges = []
+        for e in raw_edges:
+            eid = e.get("id") or f"{e.get('source')}->{e.get('target')}"
+            if eid not in seen_eids:
+                seen_eids.add(eid)
+                if not e.get("id"):
+                    e["id"] = eid
+                unique_edges.append(e)
+
+        seen_nids: set = set()
+        unique_fnodes = []
+        for n in final_nodes:
+            if n["id"] not in seen_nids:
+                seen_nids.add(n["id"])
+                unique_fnodes.append(n)
+
         return {
-            "nodes": final_nodes,
-            "edges": graph_data.get("edges", []),
+            "nodes": unique_fnodes,
+            "edges": unique_edges,
             "summary": graph_data.get("summary", "RepoGraph mapped components using Graph Orchestrator Agent.")
         }
         
