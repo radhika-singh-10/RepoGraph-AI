@@ -2,23 +2,27 @@
 
 AI-powered repository architecture visualization MVP.
 
-## Backend
+## Quick Start
 
+You can run both the frontend and backend servers concurrently using the provided startup scripts:
+
+### Start both servers
+To install dependencies (if not already installed) and launch the application:
 ```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+./run.sh
 ```
 
-## Frontend
-
+### Restart/Reset servers
+If you need to force-restart the servers or free up ports 8000 and 5173:
 ```bash
-cd frontend
-npm install
-npm run dev
+./restart.sh
 ```
+
+> [!NOTE]
+> **Live Reloading**:
+> - The **Backend** runs with hot reloading (`uvicorn --reload`), so any changes to Python files will automatically reload the server.
+> - The **Frontend** uses Vite's Instant Hot Module Replacement (HMR), so frontend code changes are instantly reflected in the browser upon saving.
+
 
 Open the Vite URL, upload a `.zip` repository, paste a public GitHub URL, or click "Load Demo Codebase" to begin.
 
