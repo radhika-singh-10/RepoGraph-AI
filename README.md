@@ -1,8 +1,35 @@
-# RepoGraph-AI
-The biggest technical challenge is accuracy — not just generating a nice-looking diagram, but making sure the explanation is grounded in the actual code. LLMs can easily overgeneralize, so I’d avoid asking the model to ‘guess’ the architecture from raw files. Instead, I’d first build a structured code graph from deterministic signals: imports, routes, package files, config files, Docker files, database clients, environment variables, and framework patterns. Then the AI explanation would be generated only from that extracted graph and selected code snippets, not from the entire repo blindly.
+# RepoGraph AI
 
-For nonstandard or mixed-language codebases, I’d design the parser as a plugin-based system. The MVP would support Python and JS/TypeScript, but the architecture would allow adding language adapters later — for example Java, Go, or Ruby. Each adapter would extract the same normalized entities: files, modules, imports, routes, services, APIs, database calls, and config dependencies. That way, even if the repo is mixed-language, everything gets converted into one common graph schema.
+AI-powered repository architecture visualization MVP.
 
-For nonstandard structures, I’d use a fallback strategy. If the tool can’t confidently classify something as a standard React app, FastAPI app, or Express service, it still builds a file/module dependency graph and then lets the AI summarize the likely architecture with confidence levels. So instead of saying ‘this is definitely the auth service,’ it might say, ‘this module appears to handle authentication because it imports JWT libraries and defines login-related routes.’
+## Backend
 
-So the key design principle is: deterministic extraction first, AI reasoning second. The AI should explain evidence from the graph, not hallucinate architecture.
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+## Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the Vite URL, upload a `.zip` repository, paste a public GitHub URL, or click "Load Demo Codebase" to begin.
+
+## Features & Multi-Agent Capabilities
+
+- **Interactive Codebase Maps**: Visualizes code files, HTTP routes, client-side API requests, database models, and utilities in structured column lanes using React Flow.
+- **SOLID Design Principles Audit**: Scans code structures to compute architectural health scores and highlights SRP, DIP, or ISP violations with refactoring remedies.
+- **Multi-Agent PR Creator (Gemini 3.5 Flash)**:
+  - **Architect Agent (Planner)**: Analyzes instructions and codebase files to formulate a change plan.
+  - **Coder Agent (Developer)**: Implements the code changes on a new git branch.
+  - **Reviewer Agent (QA)**: Evaluates the diff for AST syntax errors, drafts a comprehensive Pull Request description, and verifies design principles compliance.
+- **Interactive Agent Console**: Streams real-time thoughts and terminal logs of the collaborating agents.
+- **Pull Request & Diff Viewer**: Displays the drafted PR title/description alongside color-coded line-by-line file diffs.
+- **Local Merge Integration**: Click "Merge Pull Request" to automatically merge the changes, trigger a codebase re-scan, and refresh the visual architecture graph in real-time.
