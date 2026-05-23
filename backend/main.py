@@ -12,8 +12,8 @@ from typing import Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from models import ExplainRequest, RepoGraph
-from analyzer import build_repo_graph, explain_node, generate_pr_markdown, generate_github_action_yaml, audit_solid_principles, run_archguard_ci_agent, run_spec_validator_agent, run_multi_agent_flow
+from .models import ExplainRequest, RepoGraph
+
 
 app = FastAPI(title="RepoGraph AI")
 
@@ -147,6 +147,16 @@ def pr_report(req: RepoGraph):
 def solid_audit(req: RepoGraph):
     graph = req.model_dump()
     return audit_solid_principles(graph)
+@app.get("/graph")
+def get_graph():
+    """Return the latest generated repository graph for the frontend.
+    Used to replace static MOCK_GRAPH with live data.
+    """
+    global LAST_GRAPH
+    if LAST_GRAPH is None:
+        raise HTTPException(status_code=404, detail="Graph not generated yet")
+    return LAST_GRAPH
+
 
 
 # --- AGENT PULL REQUEST INTERFACE ROUTES ---
@@ -157,7 +167,7 @@ class AgentPRRequest(BaseModel):
 
 @app.post("/agent/create-pr")
 def create_pr(req: AgentPRRequest):
-    global LAST_WORKSPACE_DIR
+    global LAST_WORKSPACE_DIR, LAST_AGENT_PR
     if not LAST_WORKSPACE_DIR:
         from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
@@ -305,61 +315,84 @@ class PushPRRequest(BaseModel):
 
 @app.post("/agent/push-and-create-pr")
 def push_and_create_pr(req: Optional[PushPRRequest] = None):
-    global LAST_WORKSPACE_DIR
+    global LAST_WORKSPACE_DIR, LAST_AGENT_PR
     if not LAST_WORKSPACE_DIR:
         from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
     cwd = LAST_WORKSPACE_DIR
     
-    # 1. Get branch name
+    # 1. Determine branch name – reuse previous if still open
     branch_name = None
     if req and req.branch:
         branch_name = req.branch
+    elif LAST_AGENT_PR["branch"]:
+        # Verify that the PR is still open on GitHub
+        token = req.token if req and req.token else os.getenv("GITHUB_PAT")
+        if token:
+            owner_repo = "radhika-singh-10/RepoGraph-AI"
+            api_url = f"https://api.github.com/repos/{owner_repo}/pulls?head={owner_repo.split('/')[0]}:{LAST_AGENT_PR['branch']}"
+            headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+            resp = requests.get(api_url, headers=headers)
+            if resp.status_code == 200 and resp.json():
+                # PR exists and is open – reuse it
+                branch_name = LAST_AGENT_PR["branch"]
+        # fallback if verification fails
+        if not branch_name:
+            branch_name = None
 
     if not branch_name:
-        res_branch = subprocess.run(["git", "branch", "--show-current"], cwd=cwd, capture_output=True, text=True)
-        branch_name = res_branch.stdout.strip()
+        # Generate a fresh branch name
+        import random
+        import string
+        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
+        branch_name = f"agent/pr-{suffix}"
 
-    if not branch_name or branch_name in ["main", "master", "HEAD"]:
-        # Fallback to last created agent branch or mock
-        branch_name = "agent/pr-refactor"
+    # Ensure we are on the correct branch locally
+    try:
+        subprocess.run(["git", "checkout", branch_name], cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except Exception:
+        # Branch may not exist locally – create it from base
+        base_branch = "main"
+        subprocess.run(["git", "checkout", "-b", branch_name, base_branch], cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
-    # 2. Get remote URL to parse GitHub owner/repo
-    res_remote = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True, text=True)
-    remote_url = res_remote.stdout.strip()
-
-    # 3. Push branch to origin
+    # Push branch to origin
     push_res = subprocess.run(["git", "push", "origin", branch_name], cwd=cwd, capture_output=True, text=True)
 
-    # 4. Parse owner and repo
-    owner_repo = "radhika-singh-10/RepoGraph-AI"  # default
+    # 2. Parse owner/repo from remote URL
+    res_remote = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True, text=True)
+    remote_url = res_remote.stdout.strip()
+    owner_repo = "radhika-singh-10/RepoGraph-AI"  # default fallback
     match = re.search(r'github\.com[:/]([^/]+/[^/.]+)', remote_url)
     if match:
         owner_repo = match.group(1).replace(".git", "")
 
-    # 5. Create PR via GitHub API if token provided via env or request
-    token = os.getenv("GITHUB_PAT")  # fallback to env var
-    if req and hasattr(req, "token") and req.token:
+    # 3. Create PR via GitHub API if token provided
+    token = os.getenv("GITHUB_PAT")
+    if req and req.token:
         token = req.token
     pr_url = None
     if token:
         api_url = f"https://api.github.com/repos/{owner_repo}/pulls"
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
         payload = {
-            "title": req.title if hasattr(req, "title") else "AI generated PR",
+            "title": req.title if req and req.title else "AI generated PR",
             "head": branch_name,
             "base": "main",
-            "body": req.body if hasattr(req, "body") else "Generated by RepoGraph AI agents."
+            "body": req.body if req and req.body else "Generated by RepoGraph AI agents."
         }
         resp = requests.post(api_url, json=payload, headers=headers)
         if resp.status_code == 201:
             pr_url = resp.json().get("html_url")
+            # Remember this PR for future updates
+            LAST_AGENT_PR = {"branch": branch_name, "url": pr_url}
         else:
             pr_url = f"Error creating PR: {resp.status_code} {resp.text}"
     else:
-        # fallback to compare URL
+        # fallback to GitHub compare URL
         pr_url = f"https://github.com/{owner_repo}/compare/main...{branch_name}?expand=1"
+        # Store for future reuse (even without token we can still push to same branch)
+        LAST_AGENT_PR = {"branch": branch_name, "url": pr_url}
 
     return {
         "success": True,

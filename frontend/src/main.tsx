@@ -925,14 +925,25 @@ function App() {
 
   function loadDemoCodebase() {
     setLoading(true);
-    setTimeout(() => {
-      setGraph(MOCK_GRAPH);
-      setSelectedNode(null);
-      setExplanation("");
-      setActiveTab("pr");
-      setLoading(false);
-      fetchGitHistory();
-    }, 600);
+    // Fetch live graph from backend
+    fetch('http://localhost:8000/graph')
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to fetch graph');
+        return res.json();
+      })
+      .then(data => {
+        setGraph(data);
+        setSelectedNode(null);
+        setExplanation("");
+        setActiveTab("pr");
+        setLoading(false);
+        fetchGitHistory();
+      })
+      .catch(err => {
+        console.error(err);
+        alert(err.message || 'Failed to load graph');
+        setLoading(false);
+      });
   }
 
   async function explainNode(node: RepoNode) {
