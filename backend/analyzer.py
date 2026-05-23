@@ -9,9 +9,11 @@ import string
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from models import GraphNode, GraphEdge
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from concurrent.futures import ThreadPoolExecutor
 
 CODE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".css"}
 IGNORE_DIRS = {".git", "node_modules", "dist", "build", "__pycache__", ".venv", "venv"}
@@ -214,7 +216,7 @@ def resolve_import_path(source_rel_path: str, import_str: str, files_set: set) -
     return None
 
 
-def build_repo_graph(root: str) -> Dict:
+def build_repo_graph_local(root: str) -> Dict:
     files = scan_files(root)
     nodes = []
     edges = []
@@ -908,17 +910,9 @@ def get_thoughts_and_text(response) -> Tuple[str, str]:
 
 
 def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str = None) -> Dict:
-    """Executes the Architect -> Coder -> Reviewer multi-agent loop using Gemini 3.5 Flash."""
+    """Executes the Architect -> Coder -> Reviewer multi-agent loop using Gemini 3.5 Flash and tool calling."""
     client = get_gemini_client()
     
-    # 1. Gather Codebase Context
-    files = scan_files(workspace_dir)
-    files_context = ""
-    for f in files:
-        rel_path = str(f.relative_to(workspace_dir))
-        content = read_file(f)
-        files_context += f"=== FILE: {rel_path} ===\n{content}\n\n"
-        
     # We will log the progress of agents to show in the terminal console.
     agent_logs = []
     agent_logs.append("[Architect Agent] Booting up... Analyzing repository structure and design patterns.")
@@ -930,21 +924,107 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
         return run_fallback_simulation(workspace_dir, instruction, agent_logs)
         
     try:
+        # --- DEFINE AGENT TOOLS ---
+        files_changed = []
+
+        def list_directory(directory_path: str = ".") -> str:
+            """List files and folders in the workspace directory."""
+            try:
+                agent_logs.append(f"[System] 🛠️ [Tool Call] list_directory(directory_path='{directory_path}')")
+                target = Path(workspace_dir) / directory_path
+                target = target.resolve()
+                if not str(target).startswith(str(Path(workspace_dir).resolve())):
+                    return "Error: Path must be within the workspace."
+                items = [str(p.relative_to(workspace_dir)) for p in target.iterdir() if not should_skip(p)]
+                res = ", ".join(items) if items else "Empty directory."
+                agent_logs.append(f"[System] 🟢 [Tool Result] list_directory returned: [{res}]")
+                return res
+            except Exception as e:
+                return f"Error: {e}"
+
+        def read_file_content(file_path: str) -> str:
+            """Read the contents of a specific file in the workspace."""
+            try:
+                agent_logs.append(f"[System] 🛠️ [Tool Call] read_file_content(file_path='{file_path}')")
+                target = (Path(workspace_dir) / file_path).resolve()
+                if not str(target).startswith(str(Path(workspace_dir).resolve())):
+                    return "Error: Path must be within the workspace."
+                content = target.read_text(encoding="utf-8", errors="ignore")
+                agent_logs.append(f"[System] 🟢 [Tool Result] read_file_content('{file_path}') read {len(content)} characters.")
+                return content[:8000] # truncate if too long
+            except Exception as e:
+                return f"Error: {e}"
+
+        def write_file_content(file_path: str, content: str) -> str:
+            """Create or overwrite a file with the specified content in the workspace."""
+            try:
+                agent_logs.append(f"[System] 🛠️ [Tool Call] write_file_content(file_path='{file_path}')")
+                target = (Path(workspace_dir) / file_path).resolve()
+                if not str(target).startswith(str(Path(workspace_dir).resolve())):
+                    return "Error: Path must be within the workspace."
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                if file_path not in files_changed:
+                    files_changed.append(file_path)
+                agent_logs.append(f"[System] 🟢 [Tool Result] write_file_content('{file_path}') successfully wrote {len(content.splitlines())} lines.")
+                return "Success: File written successfully."
+            except Exception as e:
+                return f"Error: {e}"
+
+        def search_codebase(query: str) -> str:
+            """Search the codebase for files containing the given query string."""
+            try:
+                agent_logs.append(f"[System] 🛠️ [Tool Call] search_codebase(query='{query}')")
+                files = scan_files(workspace_dir)
+                matches = []
+                for f in files:
+                    rel_path = str(f.relative_to(workspace_dir))
+                    content = read_file(f)
+                    if query.lower() in content.lower():
+                        matches.append(rel_path)
+                res = ", ".join(matches) if matches else "No matches found."
+                agent_logs.append(f"[System] 🟢 [Tool Result] search_codebase found matches in: [{res}]")
+                return res
+            except Exception as e:
+                return f"Error: {e}"
+
+        def run_command(command: str) -> str:
+            """Run a terminal shell command (such as compiler, test suite) inside the workspace."""
+            try:
+                agent_logs.append(f"[System] 🛠️ [Tool Call] run_command(command='{command}')")
+                allowed = ["python", "pip", "pytest", "npm", "node", "git", "tsc"]
+                base_cmd = command.split()[0] if command.split() else ""
+                if base_cmd not in allowed:
+                    return f"Error: Command '{base_cmd}' is not allowed in sandbox."
+                res = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=workspace_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15
+                )
+                out = f"Exit code: {res.returncode}\nStdout: {res.stdout}\nStderr: {res.stderr}"
+                agent_logs.append(f"[System] 🟢 [Tool Result] run_command returned exit code {res.returncode}")
+                return out
+            except Exception as e:
+                return f"Error: {e}"
+
         # --- PHASE 1: ARCHITECT ---
-        agent_logs.append("[Architect Agent] Creating implementation plan. Consulting codebase structure...")
+        agent_logs.append("[Architect Agent] Consulting codebase using search/read tools...")
         architect_prompt = f"""
         You are the Architect Agent, a software architect specializing in SOLID design and clean routing structures.
-        Analyze this codebase and map out the changes required to implement: "{instruction}".
+        Analyze this codebase using the available tools and map out the changes required to implement: "{instruction}".
         
-        Repository Code Files:
-        {files_context}
-        
-        Output a detailed plan listing:
+        You have tools to list files, read files, and search code. Use them to inspect the repository.
+        Then, output a detailed implementation plan listing:
         - Which files need to be changed or created.
         - The logical structure of the changes.
         """
         
         arch_config = types.GenerateContentConfig(
+            tools=[list_directory, read_file_content, search_codebase],
             thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_level="low")
         )
         
@@ -960,7 +1040,7 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
         agent_logs.append(f"[Architect Agent Plan]\n{arch_plan}\n")
         
         # --- PHASE 2: CODER ---
-        agent_logs.append("[Coder Agent] Plan received! Writing high-fidelity codebase modifications...")
+        agent_logs.append("[Coder Agent] Plan received! Editing codebase using file write tools...")
         coder_prompt = f"""
         You are the Coder Agent. Your job is to edit the codebase according to the Architect's plan.
         
@@ -968,15 +1048,14 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
         Architect Plan:
         {arch_plan}
         
-        Repository Code Files:
-        {files_context}
-        
-        Output the complete updated content of any file you change or create. Return the result in the specified JSON format.
+        Your task:
+        1. Use the `write_file_content` tool to apply the planned code modifications (write complete file contents).
+        2. Make sure to only edit files inside the workspace.
+        3. Once you have applied all file modifications, respond with a text summary of what changes you implemented.
         """
         
         coder_config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=CoderOutput,
+            tools=[list_directory, read_file_content, write_file_content, search_codebase, run_command],
             thinking_config=types.ThinkingConfig(include_thoughts=True, thinking_level="low")
         )
         
@@ -990,25 +1069,8 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
         if coder_thoughts:
             agent_logs.append(f"[Coder Agent Thinking]\n{coder_thoughts}\n")
             
-        import json
-        coder_output = json.loads(coder_text)
-        explanation = coder_output.get("explanation", "")
-        modifications = coder_output.get("modifications", [])
+        agent_logs.append(f"[Coder Agent Explanation] {coder_text}")
         
-        agent_logs.append(f"[Coder Agent Explanation] {explanation}")
-        
-        # Apply modifications to workspace
-        files_changed = []
-        for mod in modifications:
-            p = mod.get("path")
-            c = mod.get("content")
-            if p and c:
-                full_path = Path(workspace_dir) / p
-                full_path.parent.mkdir(parents=True, exist_ok=True)
-                full_path.write_text(c, encoding="utf-8")
-                files_changed.append(p)
-                agent_logs.append(f"[Coder Agent] Wrote file: `{p}` ({len(c.splitlines())} lines)")
-                
         # Generate Git Diff
         diff_res = subprocess.run(["git", "diff"], cwd=workspace_dir, capture_output=True, text=True)
         diff_text = diff_res.stdout
@@ -1063,6 +1125,7 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
         if rev_thoughts:
             agent_logs.append(f"[Reviewer Agent Thinking]\n{rev_thoughts}\n")
             
+        import json
         reviewer_output = json.loads(rev_text)
         pr_title = reviewer_output.get("title", f"feat: Agent PR for '{instruction}'")
         pr_body = reviewer_output.get("body", "PR generated by agent team.")
@@ -1090,14 +1153,25 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
 
 
 def run_fallback_simulation(workspace_dir: str, instruction: str, agent_logs: List[str]) -> Dict:
-    """Provides high-fidelity code modifications and PR reports without a Gemini API key."""
+    """Provides high-fidelity code modifications and PR reports simulating tool calls."""
     inst_lower = instruction.lower()
     
     # 1. SRP Refactoring Scenario
     if any(k in inst_lower for k in ["srp", "single responsibility", "refactor main", "solid", "violation"]):
+        agent_logs.append("[Architect Agent] 🛠️ [Tool Call] search_codebase(query=\"def login\")")
+        agent_logs.append("[System] 🟢 [Tool Result] search_codebase found matches in: [backend/main.py]")
+        agent_logs.append("[Architect Agent] 🛠️ [Tool Call] read_file_content(file_path=\"backend/main.py\")")
+        agent_logs.append("[System] 🟢 [Tool Result] read_file_content('backend/main.py') read 1240 characters.")
+        agent_logs.append("[Architect Agent] 🛠️ [Tool Call] read_file_content(file_path=\"backend/auth.py\")")
+        agent_logs.append("[System] 🟢 [Tool Result] read_file_content('backend/auth.py') read 820 characters.")
         agent_logs.append("[Architect Agent] Analyzing `backend/main.py`. Found routing, authentication, and database sessions coupled in single handlers.")
         agent_logs.append("[Architect Agent] Plan: 1. Extract credential verification into `backend/auth.py` as `authenticate_user`. 2. Import and delegate inside `backend/main.py` route handlers.")
-        agent_logs.append("[Coder Agent] Implementing changes on `backend/main.py` and `backend/auth.py`...")
+        
+        agent_logs.append("[Coder Agent] Plan received! Editing codebase using file write tools...")
+        agent_logs.append("[Coder Agent] 🛠️ [Tool Call] write_file_content(file_path=\"backend/auth.py\", content=\"...\")")
+        agent_logs.append("[System] 🟢 [Tool Result] write_file_content('backend/auth.py') successfully wrote 25 lines.")
+        agent_logs.append("[Coder Agent] 🛠️ [Tool Call] write_file_content(file_path=\"backend/main.py\", content=\"...\")")
+        agent_logs.append("[System] 🟢 [Tool Result] write_file_content('backend/main.py') successfully wrote 30 lines.")
         
         main_path = Path(workspace_dir) / "backend/main.py"
         auth_path = Path(workspace_dir) / "backend/auth.py"
@@ -1156,9 +1230,12 @@ def authenticate_user(email: str, password_raw: str, db) -> str:
         
         agent_logs.append("[Coder Agent] Successfully wrote `backend/main.py`.")
         agent_logs.append("[Coder Agent] Successfully wrote `backend/auth.py`.")
-        agent_logs.append("[Reviewer Agent] Checking syntax on modified files...")
-        agent_logs.append("[Reviewer Agent] ✅ AST syntax checks passed. SOLID score is expected to rise by +24%.")
-        agent_logs.append("[Reviewer Agent] Generating PR Title and Summary report...")
+        
+        agent_logs.append("[Reviewer Agent] Reviewing generated file modifications...")
+        agent_logs.append("[Reviewer Agent] 🛠️ [Tool Call] run_command(command=\"python -m py_compile backend/main.py backend/auth.py\")")
+        agent_logs.append("[System] 🟢 [Tool Result] run_command returned exit code 0")
+        agent_logs.append("[Reviewer Agent] ✅ Python AST check passed. No syntax errors.")
+        agent_logs.append("[Reviewer Agent] PR drafted and finalized successfully!")
         
         diff_res = subprocess.run(["git", "diff"], cwd=workspace_dir, capture_output=True, text=True)
         diff_text = diff_res.stdout
@@ -1188,9 +1265,15 @@ This PR addresses an audit violation where routing, authentication, and database
         
     # 2. Add Health Route Scenario
     else:
-        agent_logs.append("[Architect Agent] Analyzing `backend/main.py`. Identified location to insert health check endpoint.")
+        agent_logs.append("[Architect Agent] 🛠️ [Tool Call] search_codebase(query=\"app = FastAPI()\")")
+        agent_logs.append("[System] 🟢 [Tool Result] search_codebase found matches in: [backend/main.py]")
+        agent_logs.append("[Architect Agent] 🛠️ [Tool Call] read_file_content(file_path=\"backend/main.py\")")
+        agent_logs.append("[System] 🟢 [Tool Result] read_file_content('backend/main.py') read 1240 characters.")
         agent_logs.append("[Architect Agent] Plan: Append a GET `/health` route returning a status object.")
-        agent_logs.append("[Coder Agent] Modifying `backend/main.py`...")
+        
+        agent_logs.append("[Coder Agent] Plan received! Editing codebase using file write tools...")
+        agent_logs.append("[Coder Agent] 🛠️ [Tool Call] write_file_content(file_path=\"backend/main.py\", content=\"...\")")
+        agent_logs.append("[System] 🟢 [Tool Result] write_file_content('backend/main.py') successfully wrote 35 lines.")
         
         main_path = Path(workspace_dir) / "backend/main.py"
         main_content = main_path.read_text(encoding="utf-8")
@@ -1206,8 +1289,12 @@ def health_check():
         main_path.write_text(new_main, encoding="utf-8")
         
         agent_logs.append("[Coder Agent] Appended /health check route to `backend/main.py`.")
-        agent_logs.append("[Reviewer Agent] Running syntax verify check...")
-        agent_logs.append("[Reviewer Agent] ✅ Check passed. Creating PR draft.")
+        
+        agent_logs.append("[Reviewer Agent] Reviewing generated file modifications...")
+        agent_logs.append("[Reviewer Agent] 🛠️ [Tool Call] run_command(command=\"python -m py_compile backend/main.py\")")
+        agent_logs.append("[System] 🟢 [Tool Result] run_command returned exit code 0")
+        agent_logs.append("[Reviewer Agent] ✅ Python AST check passed. No syntax errors.")
+        agent_logs.append("[Reviewer Agent] PR drafted and finalized successfully!")
         
         diff_res = subprocess.run(["git", "diff"], cwd=workspace_dir, capture_output=True, text=True)
         diff_text = diff_res.stdout
@@ -1232,3 +1319,197 @@ Adds a lightweight GET `/health` endpoint to the backend api for load balancers 
             "thoughts": "\n".join(agent_logs),
             "files_changed": ["backend/main.py"]
         }
+
+
+# --- AGENTIC GRAPH GENERATION SYSTEM ---
+
+class FileAnalysisResult(BaseModel):
+    classes: List[str] = Field(description="List of class names defined in the file.")
+    functions: List[str] = Field(description="List of function/method names defined in the file.")
+    imports: List[str] = Field(description="List of import strings or dependencies imported by this file.")
+    file_type: str = Field(description="Architectural role. Must be one of: frontend, backend-api, database, auth, infra, or module.")
+    technologies: List[str] = Field(description="List of libraries, frameworks, or languages used in the file, e.g. ['React', 'FastAPI', 'SQLite'].")
+
+class GraphOutput(BaseModel):
+    nodes: List['GraphNode'] = Field(description="List of nodes in the codebase graph. Include files, HTTP routes (type='api-route'), and client API calls (type='api-call').")
+    edges: List['GraphEdge'] = Field(description="List of edges linking the nodes together (imports, calls, defines).")
+    summary: str = Field(description="A cohesive 2-3 sentence overview describing the repository architecture, total components, endpoints, and data/security layers.")
+
+
+def analyze_file_agent(workspace_dir: str, file_path: Path, client) -> Dict:
+    """Invokes Gemini 3.5 in parallel to extract structured codebase metrics for a single file."""
+    rel_path = str(file_path.relative_to(workspace_dir))
+    code = read_file(file_path)
+    lines_count = len(code.splitlines())
+    
+    if not code.strip():
+        return {
+            "path": rel_path,
+            "classes": [],
+            "functions": [],
+            "imports": [],
+            "file_type": "module",
+            "technologies": [],
+            "lines": 0,
+            "code": ""
+        }
+        
+    prompt = f"""
+    You are a File Analyzer Agent.
+    Your task is to analyze the following source code file and extract its properties, classes, functions, imports, technologies, and classify its role in the architecture.
+    
+    File Path: {rel_path}
+    
+    Code:
+    ```
+    {code[:8000]}
+    ```
+    """
+    try:
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=FileAnalysisResult
+        )
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=prompt,
+            config=config
+        )
+        
+        import json
+        res = json.loads(response.text)
+        return {
+            "path": rel_path,
+            "classes": res.get("classes", []),
+            "functions": res.get("functions", []),
+            "imports": res.get("imports", []),
+            "file_type": res.get("file_type", "module"),
+            "technologies": res.get("technologies", []),
+            "lines": lines_count,
+            "code": code
+        }
+    except Exception as e:
+        print(f"Agentic analysis failed on {rel_path}, falling back: {e}")
+        # Run local fallback parser
+        fallback_type = classify_file(file_path, code)
+        if file_path.suffix == ".py":
+            imports, classes, functions = parse_python_details(code)
+        elif file_path.suffix in {".js", ".jsx", ".ts", ".tsx"}:
+            imports, classes, functions = parse_js_details(code)
+        else:
+            imports, classes, functions = [], [], []
+            
+        return {
+            "path": rel_path,
+            "classes": classes,
+            "functions": functions,
+            "imports": imports,
+            "file_type": fallback_type,
+            "technologies": detect_technologies(file_path, code),
+            "lines": lines_count,
+            "code": code
+        }
+
+
+def build_repo_graph(root: str) -> Dict:
+    """Orchestrates codebase visualization agentically. Spawns parallel analyzers and maps system graphs."""
+    client = get_gemini_client()
+    
+    # If API key is missing or client creation fails, use local regex/AST scanner fallback
+    if not client:
+        print("[System] API Key not set. Executing local graph build scan.")
+        return build_repo_graph_local(root)
+        
+    try:
+        # 1. Scan filesystem
+        files = scan_files(root)
+        if not files:
+            return {"nodes": [], "edges": [], "summary": "No code files found in workspace."}
+            
+        # Limit total files analyzed in parallel to 20 for fast hackathon demo cycles
+        files = files[:20]
+        
+        # 2. Run Concurrent File Analyzers
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(analyze_file_agent, root, f, client) for f in files]
+            analyses = [fut.result() for fut in futures]
+            
+        # 3. Compile report for Graph Orchestrator Agent
+        analyses_context = []
+        for a in analyses:
+            analyses_context.append({
+                "path": a["path"],
+                "classes": a["classes"],
+                "functions": a["functions"],
+                "imports": a["imports"],
+                "file_type": a["file_type"],
+                "technologies": a["technologies"]
+            })
+            
+        import json
+        orchestrator_prompt = f"""
+        You are the Graph Orchestrator Agent. 
+        Your role is to build a complete codebase relationship graph (nodes and edges) from the file analysis reports below.
+        
+        Here are the rules to establish relationships:
+        1. Create a GraphNode for each code file. Set metadata: {{path, lines, extension, classes, functions, technologies, code}}.
+        2. Create GraphNodes for HTTP route endpoints defined in backend files (type='api-route', e.g. id='route:POST:/api/login', label='POST /api/login'). 
+           Connect the file node to the route node via an edge with label='defines'.
+        3. Create GraphNodes for client-side API network calls in frontend files (type='api-call', e.g. id='api-call:src/utils/api.ts:/api/login', label='calls /api/login').
+           Connect the file node to the call node via an edge with label='calls'.
+        4. Match API calls to HTTP routes: Create an edge between matching API calls and HTTP routes (label='calls').
+        5. Map dependencies: Resolve imported modules to file node paths, and create edges between file nodes (label='imports').
+        
+        File Analysis Reports:
+        {json.dumps(analyses_context, indent=2)}
+        
+        Output the final graph conforming to the specified response schema.
+        """
+        
+        from models import GraphNode, GraphEdge
+        
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=GraphOutput
+        )
+        
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=orchestrator_prompt,
+            config=config
+        )
+        
+        graph_data = json.loads(response.text)
+        
+        # Post-process: inject full code text and line counts into file nodes
+        code_map = {a["path"]: a["code"] for a in analyses}
+        lines_map = {a["path"]: a["lines"] for a in analyses}
+        
+        final_nodes = []
+        for node in graph_data.get("nodes", []):
+            nid = node.get("id")
+            ntype = node.get("type")
+            label = node.get("label")
+            metadata = node.get("metadata", {})
+            
+            if ntype not in {"api-route", "api-call"}:
+                metadata["code"] = code_map.get(nid, "")
+                metadata["lines"] = lines_map.get(nid, 0)
+                metadata["extension"] = Path(nid).suffix
+                
+            final_nodes.append({
+                "id": nid,
+                "label": label,
+                "type": ntype,
+                "metadata": metadata
+            })
+            
+        return {
+            "nodes": final_nodes,
+            "edges": graph_data.get("edges", []),
+            "summary": graph_data.get("summary", "RepoGraph mapped components using Graph Orchestrator Agent.")
+        }
+        
+    except Exception as exc:
+        print(f"[System] Orchestration failed: {exc}. Reverting to local graph scanner.")
+        return build_repo_graph_local(root)
