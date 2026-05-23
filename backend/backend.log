@@ -1,0 +1,29 @@
+INFO:     Will watch for changes in these directories: ['/Users/radhikasingh/projects/repograph-ai/backend']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [62754] using StatReload
+INFO:     Started server process [62757]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+[System] API Key not set. Executing local graph build scan.
+INFO:     127.0.0.1:63069 - "GET /analyze-github?url=https%3A%2F%2Fgithub.com%2Fradhika-singh-10%2Fpy-test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63072 - "POST /pr-report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63074 - "POST /solid-audit HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63069 - "GET /agent/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63069 - "POST /agent/create-pr HTTP/1.1" 200 OK
+[System] API Key not set. Executing local graph build scan.
+INFO:     127.0.0.1:63095 - "GET /analyze-github?url=https%3A%2F%2Fgithub.com%2Fradhika-singh-10%2Fpy-test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63103 - "POST /pr-report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63104 - "POST /solid-audit HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63095 - "GET /agent/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63112 - "POST /agent/create-pr HTTP/1.1" 200 OK
+[System] API Key not set. Executing local graph build scan.
+INFO:     127.0.0.1:63121 - "GET /analyze-github?url=https%3A%2F%2Fgithub.com%2Fradhika-singh-10%2Fpy-test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63125 - "POST /pr-report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63126 - "POST /solid-audit HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63121 - "GET /agent/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63121 - "POST /agent/create-pr HTTP/1.1" 200 OK
+[System] API Key not set. Executing local graph build scan.
+INFO:     127.0.0.1:63139 - "GET /analyze-github?url=https%3A%2F%2Fgithub.com%2Fradhika-singh-10%2Fpy-test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63139 - "GET /agent/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63142 - "POST /pr-report HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63144 - "POST /solid-audit HTTP/1.1" 200 OK

@@ -2028,11 +2028,7 @@ function App() {
                           </button>
                         </div>
 
-                        <button 
-                          className="upload-btn" 
-                          onClick={runAgentCreator}
-                          style={{ marginTop: 8, padding: 12 }}
-                        >
+                        <button type="button" className="upload-btn" onClick={runAgentCreator} style={{ marginTop: 8, padding: 12 }}>
                           🚀 Launch Agent Team & Fix
                         </button>
                       </div>

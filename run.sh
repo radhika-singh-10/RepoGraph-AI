@@ -40,7 +40,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 echo -e "${GREEN}Starting Backend Server on port 8000...${NC}"
-uvicorn main:app --reload --port 8000 &
+uvicorn main:app --reload --port 8000 > "${PROJECT_DIR}/backend/backend.log" 2>&1 &
 BACKEND_PID=$!
 
 # 2. Setup and Start Frontend
@@ -53,4 +53,5 @@ if [ ! -d "node_modules" ]; then
 fi
 
 echo -e "${GREEN}Starting Frontend Dev Server...${NC}"
-npm run dev
+npm run dev > "${PROJECT_DIR}/frontend/frontend.log" 2>&1 &
+FRONTEND_PID=$!

@@ -1385,6 +1385,9 @@ def authenticate_user(email: str, password_raw: str, db) -> str:
         raise Exception("Invalid credentials")
     return create_access_token(user.id)"""
 
+        # Ensure target directories exist
+        main_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_path.parent.mkdir(parents=True, exist_ok=True)
         # Write files
         main_path.write_text(new_main, encoding="utf-8")
         auth_path.write_text(new_auth, encoding="utf-8")
