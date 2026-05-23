@@ -542,6 +542,156 @@ function App() {
   const [agentDiff, setAgentDiff] = React.useState<string>("");
   const [terminalLines, setTerminalLines] = React.useState<string[]>([]);
 
+  // Tri-Agent states
+  // 1. ArchGuard CI
+  const [ciStatus, setCiStatus] = React.useState<string>("idle"); // idle, running, passed, failed
+  const [ciScore, setCiScore] = React.useState<number | null>(null);
+  const [ciFailedRules, setCiFailedRules] = React.useState<string[]>([]);
+  const [ciReport, setCiReport] = React.useState<string>("");
+  const [ciTerminalLogs, setCiTerminalLogs] = React.useState<string[]>([]);
+
+  // 2. Spec Validator
+  const [specText, setSpecText] = React.useState<string>("");
+  const [specImageFile, setSpecImageFile] = React.useState<File | null>(null);
+  const [specImagePreview, setSpecImagePreview] = React.useState<string>("");
+  const [specLoading, setSpecLoading] = React.useState<boolean>(false);
+  const [specScore, setSpecScore] = React.useState<number | null>(null);
+  const [specDivergences, setSpecDivergences] = React.useState<string[]>([]);
+  const [specRemedies, setSpecRemedies] = React.useState<string[]>([]);
+
+  // 3. Time-Travel Scrubber
+  const [historyCommits, setHistoryCommits] = React.useState<any[]>([]);
+  const [currentCommitIdx, setCurrentCommitIdx] = React.useState<number>(-1);
+  const [commitNarration, setCommitNarration] = React.useState<string>("");
+  const [narrationOpen, setNarrationOpen] = React.useState<boolean>(false);
+
+  async function runArchGuardCI() {
+    setCiStatus("running");
+    setCiTerminalLogs([
+      "[CI Engine] Spinning up workflow container...",
+      "[CI Engine] Checking out pull request branch...",
+      "[CI Engine] Mapping PR architecture graph...",
+      "[CI Engine] Invoking ArchGuard Regression Gate Agent (Gemini 3.5)..."
+    ]);
+
+    const steps = [
+      "[CI Engine] Auditing circular dependencies...",
+      "[CI Engine] Evaluating SOLID principles regression metrics...",
+      "[CI Engine] Comparing graph nodes and imports boundary..."
+    ];
+    let idx = 0;
+    const interval = setInterval(() => {
+      if (idx < steps.length) {
+        setCiTerminalLogs(prev => [...prev, steps[idx]]);
+        idx++;
+      } else {
+        clearInterval(interval);
+      }
+    }, 1000);
+
+    try {
+      const res = await fetch("http://localhost:8000/agent/run-ci", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: agentBranch || "main" })
+      });
+      clearInterval(interval);
+      if (!res.ok) throw new Error("CI check failed");
+      const data = await res.json();
+      
+      setCiTerminalLogs(prev => [
+        ...prev, 
+        "[CI Engine] Regression audit completed.",
+        `[CI Engine] Gate status: ${data.passed ? "PASSED" : "FAILED"}`
+      ]);
+      setCiScore(data.regression_score);
+      setCiFailedRules(data.failed_rules || []);
+      setCiReport(data.diff_markdown || "");
+      setCiStatus(data.passed ? "passed" : "failed");
+    } catch (err: any) {
+      clearInterval(interval);
+      console.error(err);
+      setCiTerminalLogs(prev => [...prev, `[CI Engine] Error: ${err.message || "Failed CI run"}`]);
+      setCiStatus("failed");
+    }
+  }
+
+  async function runSpecValidator() {
+    if (!specText.trim() && !specImageFile) {
+      alert("Please provide either design specification text or an architecture diagram image.");
+      return;
+    }
+    setSpecLoading(true);
+    setSpecScore(null);
+    setSpecDivergences([]);
+    setSpecRemedies([]);
+
+    const formData = new FormData();
+    formData.append("spec", specText);
+    if (specImageFile) {
+      formData.append("file", specImageFile);
+    }
+
+    try {
+      const res = await fetch("http://localhost:8000/agent/validate-spec", {
+        method: "POST",
+        body: formData
+      });
+      if (!res.ok) throw new Error("Validation request failed");
+      const data = await res.json();
+      setSpecScore(data.score);
+      setSpecDivergences(data.divergences || []);
+      setSpecRemedies(data.remedy_proposals || []);
+    } catch (err: any) {
+      console.error(err);
+      alert("Specification validation failed: " + err.message);
+    } finally {
+      setSpecLoading(false);
+    }
+  }
+
+  async function fetchGitHistory() {
+    try {
+      const res = await fetch("http://localhost:8000/agent/history");
+      if (res.ok) {
+        const data = await res.json();
+        setHistoryCommits(data);
+        if (data.length > 0) {
+          // Set index to latest commit (index data.length - 1 if we map from oldest to newest)
+          setCurrentCommitIdx(data.length - 1);
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to fetch git commit logs:", err);
+    }
+  }
+
+  async function handleTimelineChange(idx: number) {
+    if (idx < 0 || idx >= historyCommits.length) return;
+    setCurrentCommitIdx(idx);
+    const commit = historyCommits[idx];
+    setCommitNarration("Historian Agent checking out commit and compiling structural narration...");
+    setNarrationOpen(true);
+    setLoading(true);
+
+    try {
+      const res = await fetch("http://localhost:8000/agent/time-travel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sha: commit.sha })
+      });
+      if (!res.ok) throw new Error("Time travel failed");
+      const data = await res.json();
+      setGraph(data.graph);
+      setCommitNarration(data.narration);
+    } catch (err: any) {
+      console.error(err);
+      setCommitNarration("Failed to travel back. Workspace revert was unsuccessful.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function triggerAutoFix(file: string, desc: string, targetFile: string) {
     setSelectedNode(null);
     setActiveTab("agent");
@@ -709,6 +859,7 @@ function App() {
       if (!res.ok) throw new Error("Upload failed");
       const data = await res.json();
       setGraph(data);
+      fetchGitHistory();
     } catch (err) {
       console.error(err);
       alert("Failed to connect to backend server. Make sure FastAPI is running on port 8000. Or, click 'Load Demo Codebase' to test without a running server!");
@@ -735,6 +886,7 @@ function App() {
       }
       const data = await res.json();
       setGraph(data);
+      fetchGitHistory();
     } catch (err: any) {
       console.error(err);
       alert(err.message || "Failed to connect to backend server.");
@@ -751,6 +903,7 @@ function App() {
       setExplanation("");
       setActiveTab("pr");
       setLoading(false);
+      fetchGitHistory();
     }, 600);
   }
 
@@ -1272,22 +1425,34 @@ function App() {
                     PR Summary
                   </button>
                   <button 
-                    className={`tab ${activeTab === "cicd" ? "active" : ""}`}
-                    onClick={() => setActiveTab("cicd")}
-                  >
-                    CI/CD Setup
-                  </button>
-                  <button 
                     className={`tab ${activeTab === "solid" ? "active" : ""}`}
                     onClick={() => setActiveTab("solid")}
                   >
                     🛡️ SOLID Audit
                   </button>
                   <button 
+                    className={`tab ${activeTab === "archguard" ? "active" : ""}`}
+                    onClick={() => setActiveTab("archguard")}
+                  >
+                    🛡️ ArchGuard CI
+                  </button>
+                  <button 
+                    className={`tab ${activeTab === "spec" ? "active" : ""}`}
+                    onClick={() => setActiveTab("spec")}
+                  >
+                    📐 Spec Validator
+                  </button>
+                  <button 
                     className={`tab ${activeTab === "agent" ? "active" : ""}`}
                     onClick={() => setActiveTab("agent")}
                   >
                     🤖 AI Agent
+                  </button>
+                  <button 
+                    className={`tab ${activeTab === "cicd" ? "active" : ""}`}
+                    onClick={() => setActiveTab("cicd")}
+                  >
+                    CI/CD Setup
                   </button>
                 </>
               )}
@@ -1457,6 +1622,216 @@ function App() {
                       )}
                     </div>
                   </div>
+                ) : activeTab === "archguard" ? (
+                  <div className="explanation-md">
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                      <h3>🛡️ ArchGuard CI Regression Gate</h3>
+                      {ciStatus !== "idle" && ciStatus !== "running" && (
+                        <div className={ciStatus === "passed" ? "ci-badge-passed" : "ci-badge-failed"}>
+                          {ciStatus === "passed" ? "PASSED" : "FAILED"}
+                        </div>
+                      )}
+                    </div>
+                    <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12 }}>
+                      Compares the current workspace against the base design guidelines and evaluates regression.
+                    </p>
+
+                    {ciStatus === "idle" && (
+                      <button className="upload-btn" onClick={runArchGuardCI} style={{ width: "100%", padding: 12 }}>
+                        Run ArchGuard CI Check
+                      </button>
+                    )}
+
+                    {ciStatus === "running" && (
+                      <div className="agent-console-container">
+                        <div className="agent-terminal" style={{ height: "180px" }}>
+                          {ciTerminalLogs.map((line, idx) => (
+                            <div key={idx} className="terminal-line system">{line}</div>
+                          ))}
+                          <span className="blinking-cursor" />
+                        </div>
+                      </div>
+                    )}
+
+                    {(ciStatus === "passed" || ciStatus === "failed") && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                        <div style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          background: "rgba(255, 255, 255, 0.03)",
+                          padding: "10px 14px",
+                          borderRadius: "10px",
+                          border: "1px solid var(--border-glass)"
+                        }}>
+                          <span style={{ fontSize: 12, fontWeight: 600 }}>REGRESSION SCORE:</span>
+                          <strong style={{
+                            fontSize: 18,
+                            fontFamily: "'Outfit', sans-serif",
+                            color: ciScore && ciScore > 20 ? "var(--color-infra)" : "var(--color-database)"
+                          }}>
+                            {ciScore}%
+                          </strong>
+                        </div>
+
+                        {ciFailedRules.length > 0 && (
+                          <div>
+                            <strong style={{ fontSize: 11, display: "block", marginBottom: 6, color: "var(--color-infra)" }}>
+                              BROKEN CONSTRAINTS:
+                            </strong>
+                            {ciFailedRules.map((rule, idx) => (
+                              <div className="ci-rule-card" key={idx}>
+                                {rule}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div 
+                          className="explanation-md"
+                          style={{
+                            background: "rgba(0,0,0,0.2)",
+                            padding: 12,
+                            borderRadius: 8,
+                            border: "1px solid rgba(255,255,255,0.05)",
+                            fontSize: 12
+                          }}
+                          dangerouslySetInnerHTML={{ __html: renderMarkdown(ciReport) }}
+                        />
+
+                        <button className="demo-btn" onClick={runArchGuardCI} style={{ width: "100%", padding: 10 }}>
+                          🔄 Re-run CI Check
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : activeTab === "spec" ? (
+                  <div className="explanation-md">
+                    <h3>📐 Spec-to-Reality Validator</h3>
+                    <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12 }}>
+                      Verify if your architectural code matches specifications or diagrams using multimodal Gemini 3.5.
+                    </p>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+                      <textarea
+                        placeholder="Define constraints, e.g.: App.tsx should not import API client utilities directly..."
+                        value={specText}
+                        onChange={(e) => setSpecText(e.target.value)}
+                        style={{
+                          width: "100%",
+                          height: "90px",
+                          background: "rgba(0,0,0,0.3)",
+                          border: "1px solid var(--border-glass)",
+                          borderRadius: "8px",
+                          color: "var(--text-primary)",
+                          fontSize: "12px",
+                          padding: "10px",
+                          resize: "none",
+                          fontFamily: "inherit"
+                        }}
+                      />
+
+                      <div 
+                        className="upload-dropzone"
+                        onClick={() => document.getElementById("spec-image-input")?.click()}
+                      >
+                        <span>🖼️ Drag or Click to upload diagram (.png, .jpg)</span>
+                        <input
+                          id="spec-image-input"
+                          type="file"
+                          accept="image/*"
+                          style={{ display: "none" }}
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              setSpecImageFile(file);
+                              const reader = new FileReader();
+                              reader.onload = (event) => {
+                                setSpecImagePreview(event.target?.result as string);
+                              };
+                              reader.readAsDataURL(file);
+                            }
+                          }}
+                        />
+                      </div>
+
+                      {specImagePreview && (
+                        <div className="preview-thumbnail-container">
+                          <img src={specImagePreview} className="preview-thumbnail" alt="Spec preview" />
+                          <span style={{ fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", maxWidth: "200px" }}>
+                            {specImageFile?.name}
+                          </span>
+                          <span 
+                            style={{ color: "var(--text-muted)", cursor: "pointer", marginLeft: "auto" }}
+                            onClick={() => {
+                              setSpecImageFile(null);
+                              setSpecImagePreview("");
+                            }}
+                          >
+                            ✕
+                          </span>
+                        </div>
+                      )}
+
+                      <button 
+                        className="upload-btn" 
+                        disabled={specLoading}
+                        onClick={runSpecValidator}
+                        style={{ padding: 12 }}
+                      >
+                        {specLoading ? "Validating Spec..." : "Verify Spec Alignment"}
+                      </button>
+                    </div>
+
+                    {specScore !== null && (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+                        <div style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          background: "rgba(255, 255, 255, 0.03)",
+                          padding: "10px 14px",
+                          borderRadius: "10px",
+                          border: "1px solid var(--border-glass)"
+                        }}>
+                          <span style={{ fontSize: 12, fontWeight: 600 }}>DESIGN ALIGNMENT SCORE:</span>
+                          <strong style={{
+                            fontSize: 18,
+                            fontFamily: "'Outfit', sans-serif",
+                            color: specScore >= 80 ? "var(--color-database)" : "var(--color-infra)"
+                          }}>
+                            {specScore}%
+                          </strong>
+                        </div>
+
+                        {specDivergences.length > 0 && (
+                          <div>
+                            <strong style={{ fontSize: 11, display: "block", marginBottom: 6, color: "var(--color-infra)" }}>
+                              DIVERGENCES DETECTED:
+                            </strong>
+                            {specDivergences.map((divg, idx) => (
+                              <div className="ci-rule-card" key={idx} style={{ background: "rgba(239, 68, 68, 0.02)" }}>
+                                ⚠️ {divg}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {specRemedies.length > 0 && (
+                          <div>
+                            <strong style={{ fontSize: 11, display: "block", marginBottom: 6, color: "var(--color-database)" }}>
+                              REMEDY RECOMMENDATIONS:
+                            </strong>
+                            {specRemedies.map((remedy, idx) => (
+                              <div className="ci-rule-card" key={idx} style={{ background: "rgba(16, 185, 129, 0.04)", borderColor: "rgba(16, 185, 129, 0.15)", color: "var(--text-secondary)" }}>
+                                💡 {remedy}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   /* activeTab === "agent" */
                   <div className="explanation-md">
@@ -1621,24 +1996,68 @@ function App() {
         )}
 
         {graph ? (
-          <ReactFlow
-            nodes={flowNodes}
-            edges={flowEdges}
-            nodeTypes={nodeTypes}
-            fitView
-            onNodeClick={(_: any, node: any) => {
-              const original = graph.nodes.find((n: RepoNode) => n.id === node.id);
-              if (original) explainNode(original);
-            }}
-            onPaneClick={() => {
-              setSelectedNode(null);
-              setActiveTab("pr");
-            }}
-          >
-            <MiniMap />
-            <Controls />
-            <Background color="rgba(255,255,255,0.05)" gap={16} size={1} />
-          </ReactFlow>
+          <>
+            <ReactFlow
+              nodes={flowNodes}
+              edges={flowEdges}
+              nodeTypes={nodeTypes}
+              fitView
+              onNodeClick={(_: any, node: any) => {
+                const original = graph.nodes.find((n: RepoNode) => n.id === node.id);
+                if (original) explainNode(original);
+              }}
+              onPaneClick={() => {
+                setSelectedNode(null);
+                setActiveTab("pr");
+              }}
+            >
+              <MiniMap />
+              <Controls />
+              <Background color="rgba(255,255,255,0.05)" gap={16} size={1} />
+            </ReactFlow>
+
+            {historyCommits.length > 0 && (
+              <>
+                {narrationOpen && commitNarration && (
+                  <div className="narration-overlay">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <strong style={{ fontFamily: "'Outfit', sans-serif", color: "#a855f7", fontSize: 12 }}>
+                        🕒 ARCHITECTURAL HISTORIAN NARRATION
+                      </strong>
+                      <span 
+                        style={{ color: "var(--text-muted)", cursor: "pointer", fontSize: 14 }}
+                        onClick={() => setNarrationOpen(false)}
+                      >
+                        ✕
+                      </span>
+                    </div>
+                    <p style={{ margin: 0 }}>{commitNarration}</p>
+                  </div>
+                )}
+
+                <div className="timeline-scrubber-container">
+                  <div className="timeline-header">
+                    <span>🕒 Time-Travel Historian Scrubber</span>
+                    <span className="commit-bubble-text">
+                      {historyCommits[currentCommitIdx]?.sha} - {historyCommits[currentCommitIdx]?.message}
+                    </span>
+                  </div>
+                  <div className="timeline-slider-row">
+                    <span style={{ fontSize: 10, color: "var(--text-muted)" }}>Oldest</span>
+                    <input
+                      type="range"
+                      className="timeline-slider"
+                      min={0}
+                      max={historyCommits.length - 1}
+                      value={currentCommitIdx}
+                      onChange={(e) => handleTimelineChange(parseInt(e.target.value))}
+                    />
+                    <span style={{ fontSize: 10, color: "var(--text-muted)" }}>Newest</span>
+                  </div>
+                </div>
+              </>
+            )}
+          </>
         ) : (
           <div className="empty-state">
             <div className="empty-icon">📁</div>

@@ -2,7 +2,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from models import ExplainRequest, RepoGraph
@@ -216,4 +216,61 @@ def merge_pr(req: MergePRRequest):
     graph = build_repo_graph(cwd)
     LAST_GRAPH = graph
     return graph
+
+
+# --- TRI-AGENT SUITE API ENDPOINTS ---
+
+@app.post("/agent/validate-spec")
+async def validate_spec(spec: str = Form(...), file: UploadFile = File(None)):
+    global LAST_WORKSPACE_DIR
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        
+    image_bytes = None
+    if file:
+        image_bytes = await file.read()
+        
+    from analyzer import run_spec_validator_agent
+    return run_spec_validator_agent(LAST_WORKSPACE_DIR, spec, image_bytes)
+
+
+class CIRunRequest(BaseModel):
+    branch: str = None
+
+@app.post("/agent/run-ci")
+def run_ci(req: CIRunRequest = None):
+    global LAST_WORKSPACE_DIR
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        
+    from analyzer import run_archguard_ci_agent
+    branch = req.branch if req and req.branch else "main"
+    return run_archguard_ci_agent(LAST_WORKSPACE_DIR, branch)
+
+
+@app.get("/agent/history")
+def git_history():
+    global LAST_WORKSPACE_DIR
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        
+    from analyzer import get_git_history
+    return get_git_history(LAST_WORKSPACE_DIR)
+
+
+class TimeTravelRequest(BaseModel):
+    sha: str
+
+@app.post("/agent/time-travel")
+def time_travel(req: TimeTravelRequest):
+    global LAST_WORKSPACE_DIR
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        
+    from analyzer import checkout_commit_and_map
+    return checkout_commit_and_map(LAST_WORKSPACE_DIR, req.sha)
 

@@ -39,3 +39,33 @@ Open the Vite URL, upload a `.zip` repository, paste a public GitHub URL, or cli
   - **Reviewer Agent (QA)**: Analyzes diffs, checks AST parsing, and drafts GitHub Pull Request description logs.
 - **Interactive Agent Console**: Streams monospaced agent conversation logs and tool invocation traces in real-time.
 - **PR Diff Viewer & Merge Loop**: Displays color-coded diff highlights and supports local git merges to re-scan and refresh codebase graphs in a single click.
+
+## Model Context Protocol (MCP) Integration
+
+RepoGraph AI includes a built-in **MCP Stdio Server** that exposes our entire agent suite as JSON-RPC tools for compatible IDEs (Cursor, Claude Desktop, VSCode).
+
+### Launch the MCP Server
+Run the stdio server using Python:
+```bash
+python3 backend/mcp_server.py
+```
+
+### Exposed MCP Tools
+1. `run_archguard_ci`: Run SOLID regression checks and branch structure comparisons.
+2. `validate_spec`: Audit codebase graphs against architectural specifications and design rules.
+3. `time_travel`: Map repository code components and generate narrated evolution summaries at a specific commit.
+4. `codebase_agent_fix`: Launch the autonomous multi-agent developer team to refactor codebase violations.
+5. `codebase_tour_guide`: Trace call dependencies and answer codebase onboarding questions agentically.
+6. `agentic_solid_audit`: Run deep Gemini-driven SOLID principles architectural health audits.
+
+---
+
+## ⚡ Gemini Parallel Tool Calling
+
+Demonstrating Gemini's state-of-the-art parallel function calling support, the orchestrator script runs compound natural language commands by triggering multiple agent workflows concurrently.
+
+### Run Parallel Orchestrator CLI
+```bash
+python3 backend/parallel_orchestrator.py "Run CI checks and validate if App.tsx should not import API directly"
+```
+Under the hood, Gemini generates concurrent function call suggestions in a single turn, which the Python `ThreadPoolExecutor` runs in parallel before returning synthesized results back to Gemini for compiling a cohesive system report.
