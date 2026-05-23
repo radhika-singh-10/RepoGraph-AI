@@ -77,6 +77,12 @@ def analyze_github(url: str):
     if "github.com" not in url:
         raise HTTPException(status_code=400, detail="Only GitHub URLs are supported.")
 
+    # Sanitize GitHub URLs (auto-extract base repo URL if user pasted a blob/tree link)
+    import re
+    match = re.match(r'(https?://github\.com/[^/]+/[^/]+)(?:/(?:blob|tree)/.*)?', url)
+    if match:
+        url = match.group(1).rstrip("/")
+
     workdir = tempfile.mkdtemp(prefix="repograph_git_")
     try:
         import subprocess
