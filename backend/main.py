@@ -7,7 +7,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from models import ExplainRequest, RepoGraph
-from analyzer import build_repo_graph, explain_node, generate_pr_markdown, generate_github_action_yaml, audit_solid_principles
+from analyzer import build_repo_graph, explain_node, generate_pr_markdown, generate_github_action_yaml, audit_solid_principles, run_archguard_ci_agent, run_spec_validator_agent, run_multi_agent_flow
 
 app = FastAPI(title="RepoGraph AI")
 
@@ -84,11 +84,20 @@ def analyze_github(url: str):
     if match:
         url = match.group(1).rstrip("/")
 
+    # Check if the scanned URL corresponds to the active local RepoGraph AI workspace
+    local_repo_path = Path(__file__).resolve().parent.parent
+    if "repograph-ai" in url.lower():
+        LAST_WORKSPACE_DIR = str(local_repo_path)
+        graph = build_repo_graph(str(local_repo_path))
+        LAST_GRAPH = graph
+        return graph
+
     workdir = tempfile.mkdtemp(prefix="repograph_git_")
     try:
         import subprocess
+        # Clone without "--depth 1" to retain the full git commit history for time-travel scrubbing
         res = subprocess.run(
-            ["git", "clone", "--depth", "1", url, workdir],
+            ["git", "clone", url, workdir],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -330,6 +339,43 @@ def push_and_create_pr(req: Optional[PushPRRequest] = None):
         "github_url": github_url,
         "output": push_res.stdout or push_res.stderr
     }
+
+@app.post("/agent/complete-pr")
+async def complete_pr(req: AgentPRRequest):
+    """Run SOLID audit, ArchGuard CI, Spec validator, then create PR via agent flow and push it.
+    Returns combined results and a PR URL.
+    """
+    global LAST_WORKSPACE_DIR, LAST_GRAPH
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        LAST_GRAPH = build_repo_graph(LAST_WORKSPACE_DIR)
+
+    # 1. SOLID audit
+    from analyzer import audit_solid_principles, run_archguard_ci_agent, run_spec_validator_agent, run_multi_agent_flow
+    solid_res = audit_solid_principles(LAST_GRAPH)
+
+    # 2. ArchGuard CI (default branch "main")
+    archguard_res = run_archguard_ci_agent(LAST_WORKSPACE_DIR, "main")
+
+    # 3. Spec validator – placeholder spec
+    spec_res = run_spec_validator_agent(LAST_WORKSPACE_DIR, "spec placeholder", None)
+
+    # 4. AI Agent – reuse existing create_pr logic to generate a branch and commit changes
+    agent_result = create_pr(req)  # returns dict with 'branch' and other info
+    branch_name = agent_result.get("branch")
+
+    # 5. Push the newly created branch and obtain PR URL
+    push_result = push_and_create_pr(PushPRRequest(branch=branch_name))
+
+    return {
+        "solid_audit": solid_res,
+        "archguard_ci": archguard_res,
+        "spec_validator": spec_res,
+        "agent": agent_result,
+        "pr": push_result,
+    }
+
 
 
 # --- FASTAPI MCP HTTP-SSE HANDLER ENDPOINTS ---
