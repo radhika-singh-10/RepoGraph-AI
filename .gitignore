@@ -48,3 +48,7 @@ Thumbs.db
 repograph_*
 repograph_mock_*
 repograph_git_*
+
+# Secrets
+.env
+backend/.env

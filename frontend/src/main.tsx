@@ -58,9 +58,12 @@ function CustomNode({ data }: { data: RepoNode & { nodeClass?: string } }) {
   
   return (
     <div className={`custom-node ${data.type} ${data.nodeClass || ""}`}>
-      {data.type !== "frontend" && (
-        <Handle type="target" position={Position.Left} style={{ background: "var(--node-color)", width: 8, height: 8 }} />
-      )}
+      <Handle
+        type="target"
+        position={Position.Left}
+        id="target"
+        style={{ background: "var(--node-color)", width: 8, height: 8 }}
+      />
       
       <div className="node-type-badge">{data.type}</div>
       <div className="node-header">
@@ -97,9 +100,12 @@ function CustomNode({ data }: { data: RepoNode & { nodeClass?: string } }) {
         </div>
       )}
       
-      {data.type !== "database" && data.type !== "infra" && (
-        <Handle type="source" position={Position.Right} style={{ background: "var(--node-color)", width: 8, height: 8 }} />
-      )}
+      <Handle
+        type="source"
+        position={Position.Right}
+        id="source"
+        style={{ background: "var(--node-color)", width: 8, height: 8 }}
+      />
     </div>
   );
 }
@@ -528,7 +534,7 @@ function App() {
   // Tabs toggle variables
   const [activeTab, setActiveTab] = React.useState<string>("pr");
   const [githubUrl, setGithubUrl] = React.useState<string>("");
-  const [prMarkdown, setPrMarkdown] = React.useState<string>("");
+  const [readmeMarkdown, setReadmeMarkdown] = React.useState<string>("");
   const [githubActionYaml, setGithubActionYaml] = React.useState<string>("");
 
   // SOLID audit variables
@@ -735,6 +741,13 @@ function App() {
     setAgentStatus("running");
     setTerminalLines(["[System] Initializing Multi-Agent Code Review & Action Team...", "[System] Connecting to local sandboxed backend..."]);
     
+    const appendTerminalLine = (line: unknown) => {
+      if (line === undefined || line === null) return;
+      const text = typeof line === "string" ? line : String(line);
+      if (!text.trim()) return;
+      setTerminalLines(prev => [...prev, text]);
+    };
+
     // Simulate initial agent environment preparation
     const progressLines = [
       "[System] Spinning up secure isolated Linux container...",
@@ -744,7 +757,7 @@ function App() {
     let step = 0;
     const progressInterval = setInterval(() => {
       if (step < progressLines.length) {
-        setTerminalLines(prev => [...prev, progressLines[step]]);
+        appendTerminalLine(progressLines[step]);
         step++;
       } else {
         clearInterval(progressInterval);
@@ -770,23 +783,25 @@ function App() {
       const data = await res.json();
       
       // Stream logs from the agents (Architect, Coder, Reviewer)
-      const fullLogs = data.thoughts || "";
+      const fullLogs = typeof data.thoughts === "string"
+        ? data.thoughts
+        : Array.isArray(data.thoughts)
+          ? data.thoughts.filter(Boolean).join("\n")
+          : "";
       const logLines = fullLogs.split("\n");
       let idx = 0;
-      setTerminalLines(prev => [...prev, "[System] Multi-agent container active. Streaming team discussions:"]);
+      appendTerminalLine("[System] Multi-agent container active. Streaming team discussions:");
       
       const streamInterval = setInterval(() => {
         if (idx < logLines.length) {
-          if (logLines[idx].trim()) {
-            setTerminalLines(prev => [...prev, logLines[idx]]);
-          }
+          appendTerminalLine(logLines[idx]);
           idx++;
         } else {
           clearInterval(streamInterval);
-          setAgentBranch(data.branch);
-          setAgentPrTitle(data.pr_title);
-          setAgentPrBody(data.pr_body);
-          setAgentDiff(data.diff);
+          setAgentBranch(data.branch || "");
+          setAgentPrTitle(data.pr_title || "Agent Pull Request");
+          setAgentPrBody(data.pr_body || "");
+          setAgentDiff(data.diff || "");
           setAgentStatus("pr_created");
         }
       }, 80);
@@ -925,10 +940,12 @@ function App() {
 
   function loadDemoCodebase() {
     setLoading(true);
-    // Fetch live graph from backend
-    fetch('http://localhost:8000/graph')
-      .then(res => {
-        if (!res.ok) throw new Error('Failed to fetch graph');
+    fetch('http://localhost:8000/analyze-demo', { method: 'POST' })
+      .then(async res => {
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || 'Failed to load demo codebase');
+        }
         return res.json();
       })
       .then(data => {
@@ -969,10 +986,10 @@ function App() {
     }
   }
 
-  // Load PR Summary, SOLID Audit, and Actions config on graph updates
+  // Load README Summary, SOLID Audit, and Actions config on graph updates
   React.useEffect(() => {
     if (!graph) {
-      setPrMarkdown("");
+      setReadmeMarkdown("");
       setGithubActionYaml("");
       setSolidScore(null);
       setSolidReport("");
@@ -981,23 +998,23 @@ function App() {
 
     const activeGraph = graph; // Guard non-null local copy for TS!
 
-    async function fetchPrReport() {
+    async function fetchReadmeReport() {
       try {
-        const res = await fetch("http://localhost:8000/pr-report", {
+        const res = await fetch("http://localhost:8000/readme-report", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(activeGraph)
         });
         if (res.ok) {
           const data = await res.json();
-          setPrMarkdown(data.markdown);
+          setReadmeMarkdown(data.markdown);
           setGithubActionYaml(data.github_action);
         } else {
-          generateLocalPrReport();
+          generateLocalReadmeReport();
         }
       } catch (err) {
-        console.warn("Backend PR report request failed, using client fallback...", err);
-        generateLocalPrReport();
+        console.warn("Backend README report request failed, using client fallback...", err);
+        generateLocalReadmeReport();
       }
     }
 
@@ -1026,7 +1043,7 @@ function App() {
       }
     }
 
-    function generateLocalPrReport() {
+    function generateLocalReadmeReport() {
       const fileNodes = activeGraph.nodes.filter(n => n.type !== "api-route" && n.type !== "api-call");
       const routeNodes = activeGraph.nodes.filter(n => n.type === "api-route");
       const callNodes = activeGraph.nodes.filter(n => n.type === "api-call");
@@ -1037,31 +1054,37 @@ function App() {
       });
 
       const report: string[] = [];
-      report.push("# 🗺️ RepoGraph AI - Pull Request Architecture Review");
-      report.push("This PR introduces codebase changes. Here is an automatically compiled system-wide architectural report:");
+      report.push("# Repository Architecture");
       report.push("");
-      report.push("### 📊 System Overview");
-      report.push(`- **Total Components Scanned**: \`${fileNodes.length}\` files`);
-      report.push(`- **Exposed API Endpoints**: \`${routeNodes.length}\` routes`);
-      report.push(`- **Client Request Triggers**: \`${callNodes.length}\` network calls`);
+      report.push("> Auto-generated README summary mapped by **RepoGraph AI**.");
+      report.push("");
+      if (activeGraph.summary) {
+        report.push("## Overview");
+        report.push(activeGraph.summary);
+        report.push("");
+      }
+      report.push("## System Snapshot");
+      report.push(`- **Components scanned**: \`${fileNodes.length}\` files`);
+      report.push(`- **API endpoints**: \`${routeNodes.length}\` routes`);
+      report.push(`- **Client network calls**: \`${callNodes.length}\` requests`);
 
       const layerLabels: Record<string, string> = {
-        frontend: "Frontend Views",
-        "backend-api": "API Routers/Controllers",
-        database: "Database Schemas/Models",
-        auth: "Security Modules",
-        infra: "DevOps & Configs",
-        module: "Business Logic Modules"
+        frontend: "Frontend",
+        "backend-api": "Backend API",
+        database: "Database",
+        auth: "Authentication",
+        infra: "Infrastructure",
+        module: "Shared modules"
       };
 
       Object.entries(layerLabels).forEach(([type, label]) => {
         if (counts[type]) {
-          report.push(`  - **${label}**: \`${counts[type]}\` files`);
+          report.push(`- **${label}**: \`${counts[type]}\` files`);
         }
       });
 
       report.push("");
-      report.push("### ⚡ Architectural Highlight (Key Modules)");
+      report.push("## Key Modules");
       const sortedFiles = [...fileNodes].sort((a, b) => {
         const linesA = (a.metadata?.lines as number) || 0;
         const linesB = (b.metadata?.lines as number) || 0;
@@ -1071,35 +1094,36 @@ function App() {
       sortedFiles.slice(0, 5).forEach(n => {
         const lines = (n.metadata?.lines as number) || 0;
         const techs = (n.metadata?.technologies as string[]) || [];
-        const techStr = techs.length > 0 ? ` (using ${techs.join(", ")})` : "";
-        report.push(`- **\`${n.label}\`** (\`${n.type}\`): \`${lines}\` lines of code${techStr}.`);
+        const techStr = techs.length > 0 ? ` — _${techs.join(", ")}_` : "";
+        report.push(`- **\`${n.label}\`** (\`${n.type}\`, \`${lines}\` lines)${techStr}`);
       });
 
       report.push("");
-      report.push("### 🔗 Relationship Graph Links");
+      report.push("## Dependencies & Routes");
       const importEdges = activeGraph.edges.filter(e => e.label === "imports");
       const definesEdges = activeGraph.edges.filter(e => e.label === "defines");
 
       if (importEdges.length > 0) {
-        report.push("**Critical File Dependencies:**");
+        report.push("### File dependencies");
         importEdges.slice(0, 5).forEach(e => {
-          report.push(`- \`${e.source}\` ➔ *imports* ➔ \`${e.target}\``);
+          report.push(`- \`${e.source}\` imports \`${e.target}\``);
         });
       }
 
       if (definesEdges.length > 0) {
-        report.push("\n**Critical Endpoint Definitions:**");
-        definesEdges.slice(0, 3).forEach(e => {
+        report.push("");
+        report.push("### Endpoint definitions");
+        definesEdges.slice(0, 5).forEach(e => {
           const routeLabel = e.target.replace("route:", "");
-          report.push(`- \`${e.source}\` ➔ *defines route* ➔ \`${routeLabel}\``);
+          report.push(`- \`${e.source}\` defines \`${routeLabel}\``);
         });
       }
 
       report.push("");
       report.push("---");
-      report.push("*Report generated by **RepoGraph AI** onboarding agent. Integrate into your CI/CD flow to map incoming code changes.*");
+      report.push("*Generated by RepoGraph AI. Re-run analysis after major refactors to keep this summary current.*");
 
-      setPrMarkdown(report.join("\n"));
+      setReadmeMarkdown(report.join("\n"));
 
       setGithubActionYaml(
         "name: RepoGraph AI Code Review\n\n" +
@@ -1284,7 +1308,7 @@ function App() {
       });
     }
 
-    fetchPrReport();
+    fetchReadmeReport();
     fetchSolidAudit();
   }, [graph]);
 
@@ -1506,7 +1530,7 @@ function App() {
                       setDetailsExpanded(true);
                     }}
                   >
-                    PR Summary
+                    README Summary
                   </button>
                   <button 
                     className={`tab ${activeTab === "solid" ? "active" : ""}`}
@@ -1596,35 +1620,34 @@ function App() {
               ) : (
                 activeTab === "pr" ? (
                   <div className="explanation-md">
-                    <h3>Pull Request Description</h3>
+                    <h3>README Summary</h3>
                     <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12 }}>
-                      Copy this markdown summary directly into your GitHub Pull Request description:
+                      Review the generated architecture summary below, then download it as README.md for your repository:
                     </p>
                     <button
                       className="upload-btn"
                       style={{ width: "100%", padding: "12px", marginBottom: "16px", fontWeight: "700" }}
-                      onClick={async () => {
-                        try {
-                          const res = await fetch("http://localhost:8000/agent/push-and-create-pr", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ branch: agentBranch || null })
-                          });
-                          if (!res.ok) throw new Error("Could not push branch");
-                          const data = await res.json();
-                          if (data.github_url) {
-                            window.open(data.github_url, "_blank");
-                          }
-                        } catch (err: any) {
-                          alert("Failed to push and create PR: " + err.message + "\nMake sure you have pushed your branch using your git terminal!");
+                      onClick={() => {
+                        if (!readmeMarkdown.trim()) {
+                          alert("No README content available yet. Analyze a repository first.");
+                          return;
                         }
+                        const blob = new Blob([readmeMarkdown], { type: "text/markdown;charset=utf-8" });
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement("a");
+                        link.href = url;
+                        link.download = "README.md";
+                        document.body.appendChild(link);
+                        link.click();
+                        link.remove();
+                        URL.revokeObjectURL(url);
                       }}
                     >
-                      🚀 Push & Create Pull Request on GitHub
+                      ⬇️ Download README.md
                     </button>
                     <textarea
                       readOnly
-                      value={prMarkdown}
+                      value={readmeMarkdown}
                       style={{
                         width: "100%",
                         height: "220px",
@@ -1644,8 +1667,8 @@ function App() {
                       className="demo-btn"
                       style={{ width: "100%", padding: "10px" }}
                       onClick={() => {
-                        navigator.clipboard.writeText(prMarkdown);
-                        alert("PR Markdown copied to clipboard!");
+                        navigator.clipboard.writeText(readmeMarkdown);
+                        alert("README markdown copied to clipboard!");
                       }}
                     >
                       📋 Copy Markdown
@@ -2049,16 +2072,17 @@ function App() {
                       <div className="agent-console-container">
                         <h3>⚡ Agent Execution Terminal</h3>
                         <div className="agent-terminal">
-                          {terminalLines.map((line, idx) => {
+                          {terminalLines.filter((line) => line != null && String(line).trim()).map((line, idx) => {
+                            const text = String(line);
                             let typeClass = "system";
-                            if (line.startsWith("[Architect")) typeClass = "architect";
-                            else if (line.startsWith("[Coder")) typeClass = "coder";
-                            else if (line.startsWith("[Reviewer")) typeClass = "reviewer";
-                            else if (line.startsWith("[Architect Agent Thinking") || line.startsWith("[Coder Agent Thinking") || line.startsWith("[Reviewer Agent Thinking")) typeClass = "thinking";
+                            if (text.startsWith("[Architect")) typeClass = "architect";
+                            else if (text.startsWith("[Coder")) typeClass = "coder";
+                            else if (text.startsWith("[Reviewer")) typeClass = "reviewer";
+                            else if (text.startsWith("[Architect Agent Thinking") || text.startsWith("[Coder Agent Thinking") || text.startsWith("[Reviewer Agent Thinking")) typeClass = "thinking";
                             
                             return (
                               <div key={idx} className={`terminal-line ${typeClass}`}>
-                                {line}
+                                {text}
                               </div>
                             );
                           })}

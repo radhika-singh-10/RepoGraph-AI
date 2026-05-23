@@ -13,6 +13,20 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from .models import ExplainRequest, RepoGraph
+from .analyzer import (
+    audit_solid_principles,
+    build_repo_graph,
+    checkout_commit_and_map,
+    explain_node,
+    generate_github_action_yaml,
+    generate_readme_markdown,
+    generate_pr_markdown,
+    get_git_history,
+    init_mock_workspace,
+    run_archguard_ci_agent,
+    run_multi_agent_flow,
+    run_spec_validator_agent,
+)
 
 
 app = FastAPI(title="RepoGraph AI")
@@ -27,6 +41,7 @@ app.add_middleware(
 
 LAST_GRAPH = None
 LAST_WORKSPACE_DIR = None
+LAST_AGENT_PR = None
 
 @app.get("/health")
 def health():
@@ -134,27 +149,45 @@ def explain(req: ExplainRequest):
     return {"explanation": explain_node(req.node_id, graph)}
 
 
-@app.post("/pr-report")
-def pr_report(req: RepoGraph):
+@app.post("/readme-report")
+def readme_report(req: RepoGraph):
     graph = req.model_dump()
     return {
-        "markdown": generate_pr_markdown(graph),
+        "markdown": generate_readme_markdown(graph),
         "github_action": generate_github_action_yaml()
     }
+
+
+@app.post("/pr-report")
+def pr_report(req: RepoGraph):
+    """Deprecated alias — use /readme-report."""
+    return readme_report(req)
 
 
 @app.post("/solid-audit")
 def solid_audit(req: RepoGraph):
     graph = req.model_dump()
     return audit_solid_principles(graph)
+@app.post("/analyze-demo")
+def analyze_demo():
+    """Build and return a demo codebase graph for first-time / offline use."""
+    global LAST_GRAPH, LAST_WORKSPACE_DIR
+    LAST_WORKSPACE_DIR = init_mock_workspace()
+    graph = build_repo_graph(LAST_WORKSPACE_DIR)
+    LAST_GRAPH = graph
+    return graph
+
+
 @app.get("/graph")
 def get_graph():
     """Return the latest generated repository graph for the frontend.
-    Used to replace static MOCK_GRAPH with live data.
+    Bootstraps the demo codebase graph on first request if none exists yet.
     """
-    global LAST_GRAPH
+    global LAST_GRAPH, LAST_WORKSPACE_DIR
     if LAST_GRAPH is None:
-        raise HTTPException(status_code=404, detail="Graph not generated yet")
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        graph = build_repo_graph(LAST_WORKSPACE_DIR)
+        LAST_GRAPH = graph
     return LAST_GRAPH
 
 
@@ -169,7 +202,6 @@ class AgentPRRequest(BaseModel):
 def create_pr(req: AgentPRRequest):
     global LAST_WORKSPACE_DIR, LAST_AGENT_PR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
 
     cwd = LAST_WORKSPACE_DIR
@@ -199,7 +231,6 @@ def create_pr(req: AgentPRRequest):
         raise HTTPException(status_code=500, detail=f"Failed to create branch: {str(exc)}")
 
     # Run multi-agent coding loop
-    from analyzer import run_multi_agent_flow
     result = run_multi_agent_flow(cwd, req.instruction, req.target_file)
 
     # Commit any changes
@@ -208,6 +239,8 @@ def create_pr(req: AgentPRRequest):
         subprocess.run(["git", "commit", "-m", f"agent: {result['pr_title']}"], cwd=cwd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
+    LAST_AGENT_PR = {"branch": branch_name, "url": None}
 
     return {
         "branch": branch_name,
@@ -256,14 +289,12 @@ def merge_pr(req: MergePRRequest):
 async def validate_spec(spec: str = Form(...), file: UploadFile = File(None)):
     global LAST_WORKSPACE_DIR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
     image_bytes = None
     if file:
         image_bytes = await file.read()
         
-    from analyzer import run_spec_validator_agent
     return run_spec_validator_agent(LAST_WORKSPACE_DIR, spec, image_bytes)
 
 
@@ -274,10 +305,8 @@ class CIRunRequest(BaseModel):
 def run_ci(req: CIRunRequest = None):
     global LAST_WORKSPACE_DIR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
-    from analyzer import run_archguard_ci_agent
     branch = req.branch if req and req.branch else "main"
     return run_archguard_ci_agent(LAST_WORKSPACE_DIR, branch)
 
@@ -286,10 +315,8 @@ def run_ci(req: CIRunRequest = None):
 def git_history():
     global LAST_WORKSPACE_DIR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
-    from analyzer import get_git_history
     return get_git_history(LAST_WORKSPACE_DIR)
 
 
@@ -300,10 +327,8 @@ class TimeTravelRequest(BaseModel):
 def time_travel(req: TimeTravelRequest):
     global LAST_WORKSPACE_DIR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
-    from analyzer import checkout_commit_and_map
     return checkout_commit_and_map(LAST_WORKSPACE_DIR, req.sha)
 
 
@@ -317,7 +342,6 @@ class PushPRRequest(BaseModel):
 def push_and_create_pr(req: Optional[PushPRRequest] = None):
     global LAST_WORKSPACE_DIR, LAST_AGENT_PR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
     cwd = LAST_WORKSPACE_DIR
@@ -326,7 +350,7 @@ def push_and_create_pr(req: Optional[PushPRRequest] = None):
     branch_name = None
     if req and req.branch:
         branch_name = req.branch
-    elif LAST_AGENT_PR["branch"]:
+    elif LAST_AGENT_PR and LAST_AGENT_PR.get("branch"):
         # Verify that the PR is still open on GitHub
         token = req.token if req and req.token else os.getenv("GITHUB_PAT")
         if token:
@@ -408,12 +432,10 @@ async def complete_pr(req: AgentPRRequest):
     """
     global LAST_WORKSPACE_DIR, LAST_GRAPH
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         LAST_GRAPH = build_repo_graph(LAST_WORKSPACE_DIR)
 
     # 1. SOLID audit
-    from analyzer import audit_solid_principles, run_archguard_ci_agent, run_spec_validator_agent, run_multi_agent_flow
     solid_res = audit_solid_principles(LAST_GRAPH)
 
     # 2. ArchGuard CI (default branch "main")
@@ -446,7 +468,6 @@ async def mcp_post_endpoint(req: dict):
     """Exposes JSON-RPC MCP tools directly over HTTP to resolve IDE client discovery 404s."""
     global LAST_WORKSPACE_DIR
     if not LAST_WORKSPACE_DIR:
-        from analyzer import init_mock_workspace
         LAST_WORKSPACE_DIR = init_mock_workspace()
         
     method = req.get("method")
@@ -501,8 +522,6 @@ async def mcp_post_endpoint(req: dict):
         params = req.get("params", {})
         tool_name = params.get("name")
         args = params.get("arguments", {})
-        
-        from analyzer import run_archguard_ci_agent, run_spec_validator_agent
         
         try:
             if tool_name == "run_archguard_ci":

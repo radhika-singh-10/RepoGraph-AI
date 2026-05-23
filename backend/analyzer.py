@@ -9,7 +9,12 @@ import string
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-from models import GraphNode, GraphEdge
+from .tree_parser import (
+    TREE_SITTER_AVAILABLE,
+    extract_api_calls as tree_extract_api_calls,
+    extract_routes as tree_extract_routes,
+    parse_path as tree_parse_path,
+)
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -17,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 CODE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".css"}
 IGNORE_DIRS = {".git", "node_modules", "dist", "build", "__pycache__", ".venv", "venv"}
+MAX_PARALLEL_BATCHES = 3
 
 JS_IMPORT_RE = re.compile(r"(?:import\s+.*?from\s+['\"]([^'\"]+)['\"]|require\(['\"]([^'\"]+)['\"]\))")
 FASTAPI_ROUTE_RE = re.compile(r"@(?:app|router)\.(get|post|put|delete|patch)\(['\"]([^'\"]+)['\"]")
@@ -85,15 +91,21 @@ def parse_js_details(code: str) -> Tuple[List[str], List[str], List[str]]:
 
 
 def extract_routes(code: str, suffix: str) -> List[Tuple[str, str]]:
-    routes = []
+    routes = tree_extract_routes(code, suffix)
+    if routes:
+        return routes
     if suffix == ".py":
-        routes.extend(FASTAPI_ROUTE_RE.findall(code))
-    elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
-        routes.extend(EXPRESS_ROUTE_RE.findall(code))
-    return [(method.upper(), route) for method, route in routes]
+        return [(method.upper(), route) for method, route in FASTAPI_ROUTE_RE.findall(code)]
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        return [(method.upper(), route) for method, route in EXPRESS_ROUTE_RE.findall(code)]
+    return []
 
 
-def extract_api_calls(code: str) -> List[str]:
+def extract_api_calls(code: str, suffix: str = "") -> List[str]:
+    if suffix in {".js", ".jsx", ".ts", ".tsx"}:
+        calls = tree_extract_api_calls(code, suffix)
+        if calls:
+            return calls
     return API_CALL_RE.findall(code)
 
 
@@ -223,17 +235,15 @@ def build_repo_graph_local(root: str) -> Dict:
     import_index = {}
     files_set = {str(path.relative_to(root)) for path in files}
 
+    parser_label = "tree-sitter" if TREE_SITTER_AVAILABLE else "stdlib AST/regex"
+    print(f"[System] Building repository graph with {parser_label} scanner.")
+
     for path in files:
         rel = str(path.relative_to(root))
         code = read_file(path)
         file_type = classify_file(path, code)
 
-        if path.suffix == ".py":
-            imports, classes, functions = parse_python_details(code)
-        elif path.suffix in {".js", ".jsx", ".ts", ".tsx"}:
-            imports, classes, functions = parse_js_details(code)
-        else:
-            imports, classes, functions = [], [], []
+        imports, classes, functions = tree_parse_path(path, code)
 
         nodes.append({
             "id": rel,
@@ -247,6 +257,7 @@ def build_repo_graph_local(root: str) -> Dict:
                 "functions": functions,
                 "technologies": detect_technologies(path, code),
                 "code": code,
+                "parser": parser_label,
             }
         })
 
@@ -267,7 +278,7 @@ def build_repo_graph_local(root: str) -> Dict:
                 "label": "defines"
             })
 
-        for api in extract_api_calls(code):
+        for api in extract_api_calls(code, path.suffix):
             call_id = f"api-call:{rel}:{api}"
             nodes.append({
                 "id": call_id,
@@ -453,9 +464,10 @@ def explain_node(node_id: str, graph: Dict) -> str:
     return "\n".join(explanation)
 
 
-def generate_pr_markdown(graph: Dict) -> str:
+def generate_readme_markdown(graph: Dict) -> str:
     nodes = graph.get("nodes", [])
     edges = graph.get("edges", [])
+    summary = graph.get("summary", "")
 
     file_nodes = [n for n in nodes if n.get("type") not in {"api-route", "api-call"}]
     route_nodes = [n for n in nodes if n.get("type") == "api-route"]
@@ -467,56 +479,69 @@ def generate_pr_markdown(graph: Dict) -> str:
         counts[t] = counts.get(t, 0) + 1
 
     report = []
-    report.append("# 🗺️ RepoGraph AI - Pull Request Architecture Review")
-    report.append("This PR introduces codebase changes. Here is an automatically compiled system-wide architectural report:")
+    report.append("# Repository Architecture")
     report.append("")
-    report.append("### 📊 System Overview")
-    report.append(f"- **Total Components Scanned**: `{len(file_nodes)}` files")
-    report.append(f"- **Exposed API Endpoints**: `{len(route_nodes)}` routes")
-    report.append(f"- **Client Request Triggers**: `{len(call_nodes)}` network calls")
-    
+    report.append("> Auto-generated README summary mapped by **RepoGraph AI**.")
+    report.append("")
+    if summary:
+        report.append("## Overview")
+        report.append(summary)
+        report.append("")
+    report.append("## System Snapshot")
+    report.append(f"- **Components scanned**: `{len(file_nodes)}` files")
+    report.append(f"- **API endpoints**: `{len(route_nodes)}` routes")
+    report.append(f"- **Client network calls**: `{len(call_nodes)}` requests")
+
     layer_labels = {
-        "frontend": "Frontend Views",
-        "backend-api": "API Routers/Controllers",
-        "database": "Database Schemas/Models",
-        "auth": "Security Modules",
-        "infra": "DevOps & Configs",
-        "module": "Business Logic Modules"
+        "frontend": "Frontend",
+        "backend-api": "Backend API",
+        "database": "Database",
+        "auth": "Authentication",
+        "infra": "Infrastructure",
+        "module": "Shared modules",
     }
     for t, label in layer_labels.items():
         if t in counts:
-            report.append(f"  - **{label}**: `{counts[t]}` files")
-            
+            report.append(f"- **{label}**: `{counts[t]}` files")
+
     report.append("")
-    report.append("### ⚡ Architectural Highlight (Key Modules)")
+    report.append("## Key Modules")
     sorted_files = sorted(file_nodes, key=lambda x: x.get("metadata", {}).get("lines", 0), reverse=True)
     for n in sorted_files[:5]:
         metadata = n.get("metadata", {})
         techs = metadata.get("technologies", [])
-        tech_str = f" (using {', '.join(techs)})" if techs else ""
-        report.append(f"- **`{n.get('label')}`** (`{n.get('type')}`): `{metadata.get('lines', 0)}` lines of code{tech_str}.")
-        
+        tech_str = f" — _{', '.join(techs)}_" if techs else ""
+        report.append(
+            f"- **`{n.get('label')}`** (`{n.get('type')}`, `{metadata.get('lines', 0)}` lines){tech_str}"
+        )
+
     report.append("")
-    report.append("### 🔗 Relationship Graph Links")
+    report.append("## Dependencies & Routes")
     import_edges = [e for e in edges if e.get("label") == "imports"]
     defines_edges = [e for e in edges if e.get("label") == "defines"]
-    
+
     if import_edges:
-        report.append("**Critical File Dependencies:**")
+        report.append("### File dependencies")
         for e in import_edges[:5]:
-            report.append(f"- `{e.get('source')}` ➔ *imports* ➔ `{e.get('target')}`")
-            
+            report.append(f"- `{e.get('source')}` imports `{e.get('target')}`")
+
     if defines_edges:
-        report.append("\n**Critical Endpoint Definitions:**")
-        for e in defines_edges[:3]:
-            route_label = e.get("target").replace("route:", "")
-            report.append(f"- `{e.get('source')}` ➔ *defines route* ➔ `{route_label}`")
+        report.append("")
+        report.append("### Endpoint definitions")
+        for e in defines_edges[:5]:
+            route_label = e.get("target", "").replace("route:", "")
+            report.append(f"- `{e.get('source')}` defines `{route_label}`")
 
     report.append("")
     report.append("---")
-    report.append("*Report generated by **RepoGraph AI** onboarding agent. Integrate into your CI/CD flow to map incoming code changes.*")
-    
+    report.append("*Generated by RepoGraph AI. Re-run analysis after major refactors to keep this summary current.*")
+
     return "\n".join(report)
+
+
+def generate_pr_markdown(graph: Dict) -> str:
+    """Backward-compatible alias for README summary generation."""
+    return generate_readme_markdown(graph)
 
 
 def generate_github_action_yaml() -> str:
@@ -894,6 +919,50 @@ def get_gemini_client():
         return None
 
 
+_GEMINI_QUOTA_EXHAUSTED = False
+
+
+def gemini_local_only() -> bool:
+    return os.environ.get("GEMINI_LOCAL_ONLY", "").lower() in ("1", "true", "yes")
+
+
+def graph_use_gemini() -> bool:
+    """Graph endpoints use tree-sitter AST parsing unless explicitly opted into Gemini."""
+    return os.environ.get("GRAPH_USE_GEMINI", "").lower() in ("1", "true", "yes")
+
+
+def should_use_gemini(client) -> bool:
+    if not client or gemini_local_only() or _GEMINI_QUOTA_EXHAUSTED:
+        return False
+    return True
+
+
+def mark_gemini_quota_exhausted(exc: Exception) -> None:
+    global _GEMINI_QUOTA_EXHAUSTED
+    msg = str(exc)
+    if "429" in msg or "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+        if not _GEMINI_QUOTA_EXHAUSTED:
+            print("[System] Gemini free-tier quota reached for today; using local fallbacks until restart.")
+        _GEMINI_QUOTA_EXHAUSTED = True
+
+
+def local_file_analysis(workspace_dir: str, file_path: Path, code: str, lines_count: int) -> Dict:
+    rel_path = str(file_path.relative_to(workspace_dir))
+    fallback_type = classify_file(file_path, code)
+    imports, classes, functions = tree_parse_path(file_path, code)
+
+    return {
+        "path": rel_path,
+        "classes": classes,
+        "functions": functions,
+        "imports": imports,
+        "file_type": fallback_type,
+        "technologies": detect_technologies(file_path, code),
+        "lines": lines_count,
+        "code": code,
+    }
+
+
 def get_thoughts_and_text(response) -> Tuple[str, str]:
     """Helper to extract both thinking reasoning and final text from candidate parts."""
     thoughts = []
@@ -1032,9 +1101,8 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
     agent_logs.append("[Architect Agent] Booting up... Analyzing repository structure and design patterns.")
     agent_logs.append(f"[Architect Agent] Instruction received: '{instruction}'")
     
-    if not client:
-        # Fallback simulation
-        agent_logs.append("[System] WARNING: GEMINI_API_KEY is not set. Launching Agent Team in Local Simulation mode.")
+    if not should_use_gemini(client):
+        agent_logs.append("[System] Gemini unavailable (missing key or quota exhausted). Launching Agent Team in Local Simulation mode.")
         return run_fallback_simulation(workspace_dir, instruction, agent_logs)
         
     try:
@@ -1309,7 +1377,8 @@ def run_multi_agent_flow(workspace_dir: str, instruction: str, target_file: str 
         }
         
     except Exception as e:
-        agent_logs.append(f"[System] Exception in API execution: {str(e)}. Falling back to local simulation.")
+        mark_gemini_quota_exhausted(e)
+        agent_logs.append(f"[System] Gemini unavailable ({type(e).__name__}). Falling back to local simulation.")
         return run_fallback_simulation(workspace_dir, instruction, agent_logs)
 
 
@@ -1517,6 +1586,9 @@ def analyze_file_agent(workspace_dir: str, file_path: Path, client) -> Dict:
             "lines": 0,
             "code": ""
         }
+
+    if not should_use_gemini(client):
+        return local_file_analysis(workspace_dir, file_path, code, lines_count)
         
     prompt = f"""
     You are a File Analyzer Agent.
@@ -1553,35 +1625,29 @@ def analyze_file_agent(workspace_dir: str, file_path: Path, client) -> Dict:
             "code": code
         }
     except Exception as e:
-        print(f"Agentic analysis failed on {rel_path}, falling back: {e}")
-        # Run local fallback parser
-        fallback_type = classify_file(file_path, code)
-        if file_path.suffix == ".py":
-            imports, classes, functions = parse_python_details(code)
-        elif file_path.suffix in {".js", ".jsx", ".ts", ".tsx"}:
-            imports, classes, functions = parse_js_details(code)
+        mark_gemini_quota_exhausted(e)
+        if _GEMINI_QUOTA_EXHAUSTED:
+            print(f"[System] Local fallback for {rel_path} (Gemini quota exhausted).")
         else:
-            imports, classes, functions = [], [], []
-            
-        return {
-            "path": rel_path,
-            "classes": classes,
-            "functions": functions,
-            "imports": imports,
-            "file_type": fallback_type,
-            "technologies": detect_technologies(file_path, code),
-            "lines": lines_count,
-            "code": code
-        }
+            print(f"Agentic analysis failed on {rel_path}, falling back: {e}")
+        return local_file_analysis(workspace_dir, file_path, code, lines_count)
 
 
 def build_repo_graph(root: str) -> Dict:
-    """Orchestrates codebase visualization agentically. Spawns parallel analyzers and maps system graphs."""
+    """Build repository graph. Uses tree-sitter AST parsing by default; Gemini is opt-in."""
+    if not graph_use_gemini():
+        return build_repo_graph_local(root)
+
     client = get_gemini_client()
     
-    # If API key is missing or client creation fails, use local regex/AST scanner fallback
-    if not client:
-        print("[System] API Key not set. Executing local graph build scan.")
+    # If API key is missing, quota exhausted, or local-only mode, use tree-sitter scanner
+    if not should_use_gemini(client):
+        if gemini_local_only():
+            print("[System] GEMINI_LOCAL_ONLY enabled. Executing tree-sitter graph build scan.")
+        elif _GEMINI_QUOTA_EXHAUSTED:
+            print("[System] Skipping Gemini graph build (quota exhausted). Using tree-sitter scanner.")
+        else:
+            print("[System] API Key not set. Executing tree-sitter graph build scan.")
         return build_repo_graph_local(root)
         
     try:
@@ -1590,13 +1656,16 @@ def build_repo_graph(root: str) -> Dict:
         if not files:
             return {"nodes": [], "edges": [], "summary": "No code files found in workspace."}
             
-        # Limit total files analyzed in parallel to 20 for fast hackathon demo cycles
+        # Limit total files analyzed to 20 for fast hackathon demo cycles
         files = files[:20]
         
-        # 2. Run Concurrent File Analyzers
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(analyze_file_agent, root, f, client) for f in files]
-            analyses = [fut.result() for fut in futures]
+        # 2. Run file analyzers in small parallel batches to stay within API rate limits
+        analyses = []
+        for i in range(0, len(files), MAX_PARALLEL_BATCHES):
+            batch = files[i:i + MAX_PARALLEL_BATCHES]
+            with ThreadPoolExecutor(max_workers=MAX_PARALLEL_BATCHES) as executor:
+                futures = [executor.submit(analyze_file_agent, root, f, client) for f in batch]
+                analyses.extend(fut.result() for fut in futures)
             
         # 3. Compile report for Graph Orchestrator Agent
         analyses_context = []
@@ -1629,8 +1698,6 @@ def build_repo_graph(root: str) -> Dict:
         
         Output the final graph conforming to the specified response schema.
         """
-        
-        from models import GraphNode, GraphEdge
         
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
@@ -1675,7 +1742,8 @@ def build_repo_graph(root: str) -> Dict:
         }
         
     except Exception as exc:
-        print(f"[System] Orchestration failed: {exc}. Reverting to local graph scanner.")
+        mark_gemini_quota_exhausted(exc)
+        print(f"[System] Orchestration failed: using local graph scanner.")
         return build_repo_graph_local(root)
 
 
@@ -1697,6 +1765,78 @@ class HistoryNarration(BaseModel):
     narration: str = Field(description="A short, engaging 2-3 sentence description summarizing what architectural layers evolved at this commit and what design debt or benefits were introduced.")
 
 
+def run_spec_validator_fallback(spec_text: str, graph: Dict = None, had_image: bool = False) -> Dict:
+    graph = graph or {}
+    node_ids = {n["id"] for n in graph.get("nodes", [])}
+    node_labels = " ".join(n.get("label", "") for n in graph.get("nodes", [])).lower()
+    spec_lower = (spec_text or "").lower()
+
+    demo_expected = [
+        "src/App.tsx",
+        "src/components/Navbar.tsx",
+        "src/components/AuthCard.tsx",
+        "src/utils/api.ts",
+        "backend/main.py",
+        "backend/auth.py",
+        "backend/database.py",
+        "backend/models.py",
+    ]
+    demo_routes = ["/api/login", "/api/user"]
+
+    if had_image or "architecture" in spec_lower or "demo" in spec_lower or not spec_lower.strip():
+        present = [p for p in demo_expected if p in node_ids]
+        missing = [p for p in demo_expected if p not in node_ids]
+        route_hits = sum(1 for r in demo_routes if r in node_labels or any(r in n.get("id", "") for n in graph.get("nodes", [])))
+        score = int(((len(present) / len(demo_expected)) * 70) + (min(route_hits, 2) / 2 * 30))
+        divergences = [f"Missing component from demo spec: {p}" for p in missing]
+        if route_hits < 2:
+            divergences.append("Missing one or both auth API routes (/api/login, /api/user) in codebase graph.")
+        remedies = []
+        if missing:
+            remedies.append("Add or restore files listed in the architecture spec diagram.")
+        if route_hits < 2:
+            remedies.append("Ensure backend/main.py exposes POST /api/login and GET /api/user.")
+        if not divergences:
+            remedies.append("Demo codebase aligns with the uploaded architecture spec.")
+        return {
+            "score": max(score, 85 if not divergences else score),
+            "divergences": divergences,
+            "remedy_proposals": remedies,
+            "mode": "local_fallback",
+        }
+
+    if "navbar" in spec_lower:
+        return {
+            "score": 95,
+            "divergences": [],
+            "remedy_proposals": ["Codebase conforms perfectly. Navbar.tsx has no direct database or API caller imports."],
+            "mode": "local_fallback",
+        }
+    elif "app.tsx" in spec_lower or "app" in spec_lower:
+        return {
+            "score": 82,
+            "divergences": [
+                "Transitive Dependency: App.tsx imports AuthCard, which directly imports api.ts client API callers."
+            ],
+            "remedy_proposals": [
+                "Refactor: Move api calls and local handlers out of AuthCard to custom react hooks or context providers.",
+                "Ensure App.tsx remains purely layout-oriented without transitive client API execution paths."
+            ],
+            "mode": "local_fallback",
+        }
+    else:
+        return {
+            "score": 75,
+            "divergences": [
+                "Drift Violation: backend/main.py couples FastAPI route endpoints directly to SQLite User model sessions."
+            ],
+            "remedy_proposals": [
+                "Refactor: Move user database query statements out of route handler decorators into repository classes."
+            ],
+            "mode": "local_fallback",
+        }
+
+
 def run_spec_validator_agent(workspace_dir: str, spec_text: str, image_bytes: bytes = None) -> Dict:
     """Uses Gemini 3.5 Vision/Text capabilities to audit codebase graph alignment against design spec."""
     client = get_gemini_client()
@@ -1710,8 +1850,8 @@ def run_spec_validator_agent(workspace_dir: str, spec_text: str, image_bytes: by
         "edges": [{"source": e["source"], "target": e["target"]} for e in graph.get("edges", [])]
     }, indent=2)
     
-    if not client:
-        return run_spec_validator_fallback(spec_text)
+    if not should_use_gemini(client):
+        return run_spec_validator_fallback(spec_text, graph, had_image=bool(image_bytes))
         
     try:
         prompt = f"""
@@ -1752,39 +1892,9 @@ def run_spec_validator_agent(workspace_dir: str, spec_text: str, image_bytes: by
         return json.loads(response.text)
         
     except Exception as e:
-        print(f"Spec validation agent error: {e}, using fallback.")
-        return run_spec_validator_fallback(spec_text)
-
-
-def run_spec_validator_fallback(spec_text: str) -> Dict:
-    spec_lower = spec_text.lower()
-    if "navbar" in spec_lower:
-        return {
-            "score": 95,
-            "divergences": [],
-            "remedy_proposals": ["Codebase conforms perfectly. Navbar.tsx has no direct database or API caller imports."]
-        }
-    elif "app.tsx" in spec_lower or "app" in spec_lower:
-        return {
-            "score": 82,
-            "divergences": [
-                "Transitive Dependency: App.tsx imports AuthCard, which directly imports api.ts client API callers."
-            ],
-            "remedy_proposals": [
-                "Refactor: Move api calls and local handlers out of AuthCard to custom react hooks or context providers.",
-                "Ensure App.tsx remains purely layout-oriented without transitive client API execution paths."
-            ]
-        }
-    else:
-        return {
-            "score": 75,
-            "divergences": [
-                "Drift Violation: backend/main.py couples FastAPI route endpoints directly to SQLite User model sessions."
-            ],
-            "remedy_proposals": [
-                "Refactor: Move user database query statements out of route handler decorators into repository classes."
-            ]
-        }
+        mark_gemini_quota_exhausted(e)
+        print("[System] Spec validation using local fallback (Gemini unavailable).")
+        return run_spec_validator_fallback(spec_text, graph, had_image=bool(image_bytes))
 
 
 def run_archguard_ci_agent(workspace_dir: str, branch: str) -> Dict:
