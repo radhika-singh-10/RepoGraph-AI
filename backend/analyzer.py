@@ -1911,6 +1911,16 @@ def checkout_commit_and_map(workspace_dir: str, commit_sha: str) -> Dict:
     """Checks out a commit temporarily, rebuilds graph structure, and narrations code evolution."""
     client = get_gemini_client()
     
+    # Try stashing local changes to allow clean checkout if workspace is dirty
+    stashed = False
+    try:
+        res_status = subprocess.run(["git", "status", "--porcelain"], cwd=workspace_dir, capture_output=True, text=True)
+        if res_status.stdout.strip():
+            subprocess.run(["git", "stash"], cwd=workspace_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stashed = True
+    except Exception:
+        pass
+        
     # Try local checkout
     current_branch = "main"
     try:
@@ -1934,9 +1944,11 @@ def checkout_commit_and_map(workspace_dir: str, commit_sha: str) -> Dict:
     except Exception:
         pass
         
-    # Restore current branch
+    # Restore current branch and unstash changes
     try:
         subprocess.run(["git", "checkout", current_branch], cwd=workspace_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if stashed:
+            subprocess.run(["git", "stash", "pop"], cwd=workspace_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
         
@@ -2030,10 +2042,13 @@ def run_codebase_tour_guide_agent(workspace_dir: str, query: str) -> str:
         Keep your explanation engaging, concise, and structured in Markdown format.
         """
         
-        response = client.models.generate_content(
+        chat = client.chats.create(
             model="gemini-3.5-flash",
-            contents=prompt
+            config=types.GenerateContentConfig(
+                system_instruction="You are the RepoGraph Onboarding Copilot / Codebase Tour Guide Agent. Assist users in exploring codebases."
+            )
         )
+        response = chat.send_message(prompt)
         return response.text
     except Exception as e:
         return f"Error executing Tour Guide Agent: {str(e)}"

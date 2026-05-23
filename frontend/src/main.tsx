@@ -520,6 +520,10 @@ function App() {
   const [selectedNode, setSelectedNode] = React.useState<RepoNode | null>(null);
   const [explanation, setExplanation] = React.useState<string>("");
   const [loading, setLoading] = React.useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(false);
+  const [detailsExpanded, setDetailsExpanded] = React.useState<boolean>(true);
+  const [sidebarWidth, setSidebarWidth] = React.useState<number>(420);
+  const [isResizing, setIsResizing] = React.useState<boolean>(false);
   
   // Tabs toggle variables
   const [activeTab, setActiveTab] = React.useState<string>("pr");
@@ -564,6 +568,30 @@ function App() {
   const [currentCommitIdx, setCurrentCommitIdx] = React.useState<number>(-1);
   const [commitNarration, setCommitNarration] = React.useState<string>("");
   const [narrationOpen, setNarrationOpen] = React.useState<boolean>(false);
+
+  const startResizing = React.useCallback((mouseDownEvent: React.MouseEvent) => {
+    mouseDownEvent.preventDefault();
+    setIsResizing(true);
+    
+    const startWidth = sidebarWidth;
+    const startX = mouseDownEvent.clientX;
+
+    const doDrag = (mouseMoveEvent: MouseEvent) => {
+      const newWidth = startWidth + (mouseMoveEvent.clientX - startX);
+      if (newWidth >= 280 && newWidth <= 700) {
+        setSidebarWidth(newWidth);
+      }
+    };
+
+    const stopDrag = () => {
+      setIsResizing(false);
+      document.removeEventListener("mousemove", doDrag);
+      document.removeEventListener("mouseup", stopDrag);
+    };
+
+    document.addEventListener("mousemove", doDrag);
+    document.addEventListener("mouseup", stopDrag);
+  }, [sidebarWidth]);
 
   async function runArchGuardCI() {
     setCiStatus("running");
@@ -1338,9 +1366,44 @@ function App() {
   }, [graph, selectedNode, connectedEdgeIds]);
 
   return (
-    <div className="app">
-      <aside className="sidebar">
-        <h1>RepoGraph AI</h1>
+    <div 
+      className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
+      style={{
+        gridTemplateColumns: sidebarCollapsed ? "0px 1fr" : `${sidebarWidth}px 1fr`,
+        transition: isResizing ? "none" : "grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+      }}
+    >
+      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+        {!sidebarCollapsed && (
+          <div 
+            className={`sidebar-resizer ${isResizing ? "resizing" : ""}`} 
+            onMouseDown={startResizing}
+          />
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+          <h1 style={{ margin: 0 }}>RepoGraph AI</h1>
+          <button
+            onClick={() => setSidebarCollapsed(true)}
+            title="Collapse Sidebar"
+            className="collapse-sidebar-toggle-btn"
+            style={{
+              background: "rgba(255, 255, 255, 0.03)",
+              border: "1px solid var(--border-glass)",
+              borderRadius: "8px",
+              color: "var(--text-secondary)",
+              cursor: "pointer",
+              fontSize: "11px",
+              padding: "6px 10px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "4px",
+              transition: "all 0.2s"
+            }}
+          >
+            ◀ Collapse
+          </button>
+        </div>
         <p className="subtitle">Visual codebase architecture explorer & smart developer onboarding guide.</p>
 
         <div className="actions">
@@ -1395,13 +1458,19 @@ function App() {
                 <>
                   <button 
                     className={`tab ${activeTab === "explain" ? "active" : ""}`}
-                    onClick={() => setActiveTab("explain")}
+                    onClick={() => {
+                      setActiveTab("explain");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     AI Onboarding
                   </button>
                   <button 
                     className={`tab ${activeTab === "code" ? "active" : ""}`}
-                    onClick={() => setActiveTab("code")}
+                    onClick={() => {
+                      setActiveTab("code");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     Inspect Code
                   </button>
@@ -1411,6 +1480,7 @@ function App() {
                     onClick={() => {
                       setSelectedNode(null);
                       setActiveTab("pr");
+                      setDetailsExpanded(true);
                     }}
                   >
                     ✕ Close
@@ -1420,45 +1490,85 @@ function App() {
                 <>
                   <button 
                     className={`tab ${activeTab === "pr" ? "active" : ""}`}
-                    onClick={() => setActiveTab("pr")}
+                    onClick={() => {
+                      setActiveTab("pr");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     PR Summary
                   </button>
                   <button 
                     className={`tab ${activeTab === "solid" ? "active" : ""}`}
-                    onClick={() => setActiveTab("solid")}
+                    onClick={() => {
+                      setActiveTab("solid");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     🛡️ SOLID Audit
                   </button>
                   <button 
                     className={`tab ${activeTab === "archguard" ? "active" : ""}`}
-                    onClick={() => setActiveTab("archguard")}
+                    onClick={() => {
+                      setActiveTab("archguard");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     🛡️ ArchGuard CI
                   </button>
                   <button 
                     className={`tab ${activeTab === "spec" ? "active" : ""}`}
-                    onClick={() => setActiveTab("spec")}
+                    onClick={() => {
+                      setActiveTab("spec");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     📐 Spec Validator
                   </button>
                   <button 
                     className={`tab ${activeTab === "agent" ? "active" : ""}`}
-                    onClick={() => setActiveTab("agent")}
+                    onClick={() => {
+                      setActiveTab("agent");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     🤖 AI Agent
                   </button>
                   <button 
                     className={`tab ${activeTab === "cicd" ? "active" : ""}`}
-                    onClick={() => setActiveTab("cicd")}
+                    onClick={() => {
+                      setActiveTab("cicd");
+                      setDetailsExpanded(true);
+                    }}
                   >
                     CI/CD Setup
+                  </button>
+                  <button
+                    onClick={() => setDetailsExpanded(!detailsExpanded)}
+                    title={detailsExpanded ? "Collapse Content" : "Expand Content"}
+                    style={{
+                      marginLeft: "auto",
+                      background: "rgba(255, 255, 255, 0.03)",
+                      border: "1px solid var(--border-glass)",
+                      borderRadius: "6px",
+                      color: "var(--text-secondary)",
+                      cursor: "pointer",
+                      fontSize: "10px",
+                      padding: "4px 8px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "2px",
+                      fontWeight: 600,
+                      transition: "all 0.2s"
+                    }}
+                  >
+                    {detailsExpanded ? "▼ Collapse" : "▲ Expand"}
                   </button>
                 </>
               )}
             </div>
             
-            <div className="details-content">
+            {detailsExpanded && (
+              <div className="details-content">
               {selectedNode ? (
                 activeTab === "explain" ? (
                   <div 
@@ -1479,6 +1589,28 @@ function App() {
                     <p style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 12 }}>
                       Copy this markdown summary directly into your GitHub Pull Request description:
                     </p>
+                    <button
+                      className="upload-btn"
+                      style={{ width: "100%", padding: "12px", marginBottom: "16px", fontWeight: "700" }}
+                      onClick={async () => {
+                        try {
+                          const res = await fetch("http://localhost:8000/agent/push-and-create-pr", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ branch: agentBranch || null })
+                          });
+                          if (!res.ok) throw new Error("Could not push branch");
+                          const data = await res.json();
+                          if (data.github_url) {
+                            window.open(data.github_url, "_blank");
+                          }
+                        } catch (err: any) {
+                          alert("Failed to push and create PR: " + err.message + "\nMake sure you have pushed your branch using your git terminal!");
+                        }
+                      }}
+                    >
+                      🚀 Push & Create Pull Request on GitHub
+                    </button>
                     <textarea
                       readOnly
                       value={prMarkdown}
@@ -1979,11 +2111,43 @@ function App() {
                 )
               )}
             </div>
+            )}
           </div>
         )}
       </aside>
 
       <main className="graph">
+        {sidebarCollapsed && (
+          <button 
+            onClick={() => setSidebarCollapsed(false)}
+            title="Expand Sidebar"
+            className="expand-sidebar-toggle-btn"
+            style={{
+              position: 'absolute',
+              left: '20px',
+              top: '20px',
+              zIndex: 100,
+              background: 'var(--bg-glass)',
+              border: '1px solid var(--border-glass)',
+              borderRadius: '10px',
+              color: 'var(--text-primary)',
+              padding: '10px 16px',
+              cursor: 'pointer',
+              fontFamily: "'Outfit', sans-serif",
+              fontSize: '13px',
+              fontWeight: 600,
+              boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              backdropFilter: 'blur(20px)',
+              transition: 'all 0.3s',
+            }}
+          >
+            ▶ Expand Sidebar
+          </button>
+        )}
+
         {graph && (
           <div className="swimlane-headers">
             <div className="swimlane-header">Client UI</div>

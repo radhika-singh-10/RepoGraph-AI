@@ -60,10 +60,16 @@ body::before {
   height: 100vh;
   position: relative;
   overflow: hidden;
+  transition: grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.app.sidebar-collapsed {
+  grid-template-columns: 0px 1fr;
 }
 
 /* Sidebar styling */
 .sidebar {
+  position: relative;
   padding: 32px 24px;
   background: var(--bg-glass);
   backdrop-filter: blur(24px);
@@ -74,6 +80,15 @@ body::before {
   overflow-y: auto;
   z-index: 10;
   box-shadow: 10px 0 30px rgba(0, 0, 0, 0.3);
+  transition: padding 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar.collapsed {
+  padding: 32px 0px;
+  opacity: 0;
+  pointer-events: none;
+  border-right-color: transparent;
+  overflow: hidden;
 }
 
 /* Scrollbars */
@@ -998,4 +1013,37 @@ h1 {
   margin-bottom: 8px;
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+/* Custom expand/collapse toggle button styles */
+.collapse-sidebar-toggle-btn:hover {
+  color: var(--text-primary) !important;
+  border-color: var(--color-backend) !important;
+  box-shadow: 0 0 12px var(--glow-violet) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
+.expand-sidebar-toggle-btn:hover {
+  border-color: var(--color-frontend) !important;
+  box-shadow: 0 0 15px var(--glow-cyan) !important;
+  transform: scale(1.03);
+}
+
+/* Sidebar Resizer Styles */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 20;
+  background: transparent;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.resizing {
+  background: linear-gradient(to bottom, var(--color-backend), var(--color-frontend)) !important;
+  box-shadow: 0 0 8px var(--glow-cyan) !important;
 }

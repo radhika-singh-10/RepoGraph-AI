@@ -2,6 +2,7 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -137,7 +138,7 @@ def solid_audit(req: RepoGraph):
 
 class AgentPRRequest(BaseModel):
     instruction: str
-    target_file: str = None
+    target_file: Optional[str] = None
 
 @app.post("/agent/create-pr")
 def create_pr(req: AgentPRRequest):
@@ -279,4 +280,161 @@ def time_travel(req: TimeTravelRequest):
         
     from analyzer import checkout_commit_and_map
     return checkout_commit_and_map(LAST_WORKSPACE_DIR, req.sha)
+
+
+class PushPRRequest(BaseModel):
+    branch: Optional[str] = None
+
+@app.post("/agent/push-and-create-pr")
+def push_and_create_pr(req: Optional[PushPRRequest] = None):
+    global LAST_WORKSPACE_DIR
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        
+    cwd = LAST_WORKSPACE_DIR
+    import subprocess
+    import re
+    
+    # 1. Get branch name
+    branch_name = None
+    if req and req.branch:
+        branch_name = req.branch
+        
+    if not branch_name:
+        res_branch = subprocess.run(["git", "branch", "--show-current"], cwd=cwd, capture_output=True, text=True)
+        branch_name = res_branch.stdout.strip()
+        
+    if not branch_name or branch_name in ["main", "master", "HEAD"]:
+        # Fallback to last created agent branch or mock
+        branch_name = "agent/pr-refactor"
+        
+    # 2. Get remote URL to parse GitHub owner/repo
+    res_remote = subprocess.run(["git", "remote", "get-url", "origin"], cwd=cwd, capture_output=True, text=True)
+    remote_url = res_remote.stdout.strip()
+    
+    # 3. Push branch to origin
+    push_res = subprocess.run(["git", "push", "origin", branch_name], cwd=cwd, capture_output=True, text=True)
+    
+    # 4. Parse owner and repo
+    owner_repo = "radhika-singh-10/RepoGraph-AI" # default
+    match = re.search(r'github\.com[:/]([^/]+/[^/.]+)', remote_url)
+    if match:
+        owner_repo = match.group(1).replace(".git", "")
+        
+    github_url = f"https://github.com/{owner_repo}/compare/main...{branch_name}?expand=1"
+    
+    return {
+        "success": True,
+        "branch": branch_name,
+        "github_url": github_url,
+        "output": push_res.stdout or push_res.stderr
+    }
+
+
+# --- FASTAPI MCP HTTP-SSE HANDLER ENDPOINTS ---
+
+@app.post("/mcp")
+async def mcp_post_endpoint(req: dict):
+    """Exposes JSON-RPC MCP tools directly over HTTP to resolve IDE client discovery 404s."""
+    global LAST_WORKSPACE_DIR
+    if not LAST_WORKSPACE_DIR:
+        from analyzer import init_mock_workspace
+        LAST_WORKSPACE_DIR = init_mock_workspace()
+        
+    method = req.get("method")
+    req_id = req.get("id")
+    
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {
+                    "name": "repograph-ai-mcp",
+                    "version": "1.0.0"
+                }
+            }
+        }
+        
+    elif method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": [
+                    {
+                        "name": "run_archguard_ci",
+                        "description": "Compares base branch vs current branch to check architectural regressions & SOLID compliance.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "branch": {"type": "string"}
+                            }
+                        }
+                    },
+                    {
+                        "name": "validate_spec",
+                        "description": "Compares design specifications against codebase graph.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "spec_text": {"type": "string"}
+                            },
+                            "required": ["spec_text"]
+                        }
+                    }
+                ]
+            }
+        }
+        
+    elif method == "tools/call":
+        params = req.get("params", {})
+        tool_name = params.get("name")
+        args = params.get("arguments", {})
+        
+        from analyzer import run_archguard_ci_agent, run_spec_validator_agent
+        
+        try:
+            if tool_name == "run_archguard_ci":
+                branch = args.get("branch", "main")
+                res = run_archguard_ci_agent(LAST_WORKSPACE_DIR, branch)
+                text = f"Regression Score: {res.get('regression_score')}% - Passed: {res.get('passed')}"
+            elif tool_name == "validate_spec":
+                spec_text = args.get("spec_text")
+                res = run_spec_validator_agent(LAST_WORKSPACE_DIR, spec_text)
+                text = f"Alignment Score: {res.get('score')}%"
+            else:
+                text = f"Unknown tool {tool_name}"
+                
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": text}]
+                }
+            }
+        except Exception as e:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32603, "message": str(e)}
+            }
+            
+    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": "Method not found"}}
+
+
+@app.get("/mcp")
+def mcp_get_endpoint():
+    return {"status": "ok", "message": "RepoGraph AI MCP Server HTTP endpoint is active."}
+
+@app.get("/.well-known/oauth-protected-resource/mcp")
+def oauth_mcp_discovery():
+    return {"status": "ok"}
+
+@app.get("/.well-known/oauth-protected-resource")
+def oauth_discovery():
+    return {"status": "ok"}
 
