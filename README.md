@@ -4,6 +4,11 @@
 
 ---
 
+### Project demoed in Google I/O Hackathon Round 1(23rh May 2026). 
+### Team name - <a href="https://cerebralvalley.ai/e/google-io-hackathon/hackathon/gallery?project=90">Archon</a>
+
+---
+
 ## 🏗️ Core Architecture & Agent Layout
 
 ```mermaid
